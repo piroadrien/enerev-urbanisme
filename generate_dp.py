@@ -131,12 +131,14 @@ def get_project_data(session, org_id, project_id, token):
     return r.json()
 
 
-def update_system_image(session, org_id, project_id, token, system_uuid, out_path, width=1600, height=1200):
+def update_system_image(session, org_id, project_id, token, system_uuid, out_path, rotation_deg=None, width=1600, height=1200):
     """
     Recupere l'image du systeme (calepinage/rendu) directement depuis
     OpenSolar -- endpoint simple et synchrone, deja utilise et eprouve
     dans generate_etude_faisabilite_v17.py. Contrairement au rapport
-    d'ombrage, une seule vue fixe (pas de parametre d'angle/direction).
+    d'ombrage, une seule vue fixe (pas de parametre d'angle/direction cote
+    OpenSolar) : si 'rotation_deg' est fourni, l'image est pivotee cote
+    Python apres telechargement (voir rotate_image_bytes).
     """
     r = session.get(
         f"{OS_API_BASE}/api/orgs/{org_id}/projects/{project_id}/systems/{system_uuid}/image/",
@@ -146,8 +148,38 @@ def update_system_image(session, org_id, project_id, token, system_uuid, out_pat
     )
     if r.status_code != 200 or not r.content:
         raise RuntimeError(f"Echec recuperation de l'image du systeme (HTTP {r.status_code}).")
-    out_path.write_bytes(r.content)
-    print(f"  image du systeme recuperee ({len(r.content)} octets)")
+    content = r.content
+    if rotation_deg:
+        content = rotate_image_bytes(content, rotation_deg)
+    out_path.write_bytes(content)
+    print(f"  image du systeme recuperee ({len(r.content)} octets){' + pivotee' if rotation_deg else ''}")
+
+
+def rotate_image_bytes(image_bytes: bytes, mapRotation_deg: float) -> bytes:
+    """
+    Pivote une image raster (JPEG) pour l'aligner comme les cartes DP4 --
+    meme angle 'rotation_deg' que compute_panel_tight_view (convention
+    mapRotation de QGIS, deja validee empiriquement pour les cartes
+    vectorielles).
+
+    ATTENTION -- NON VALIDE VISUELLEMENT sur une image raster : PIL fait
+    tourner une image dans le sens ANTI-horaire pour un angle positif,
+    alors que la convention mapRotation de QGIS semble etre horaire (a
+    confirmer). Hypothese de depart ici : angle PIL = -mapRotation_deg (on
+    inverse pour compenser le sens oppose). A verifier visuellement sur le
+    premier essai -- si le rendu est a l'envers, inverser le signe
+    (utiliser +mapRotation_deg au lieu de -mapRotation_deg).
+    """
+    from io import BytesIO
+    from PIL import Image
+
+    img = Image.open(BytesIO(image_bytes))
+    pil_angle = -mapRotation_deg  # hypothese a confirmer (voir docstring)
+    rotated = img.rotate(pil_angle, expand=True, fillcolor="white")
+
+    buf = BytesIO()
+    rotated.convert("RGB").save(buf, format="JPEG", quality=92)
+    return buf.getvalue()
 
 
 def list_systems(session, org_id, project_id, token):
@@ -191,6 +223,29 @@ def choose_system(systems, preselected=None):
         except ValueError:
             pass
         print("Choix invalide.")
+
+
+def get_project_author(project) -> str:
+    """
+    Nom de l'auteur/vendeur du projet, depuis le champ OpenSolar
+    'sales_rep'. La forme exacte de ce champ (chaine simple ou objet
+    imbrique avec prenom/nom) n'a pas pu etre confirmee sans acces direct
+    a l'API -- gere les cas les plus courants ; ajuste cette fonction si
+    le nom ne remonte pas correctement pour ton compte.
+    """
+    sales_rep = project.get("sales_rep")
+    if not sales_rep:
+        return ""
+    if isinstance(sales_rep, str):
+        return sales_rep
+    if isinstance(sales_rep, dict):
+        for key in ("display", "name", "full_name"):
+            if sales_rep.get(key):
+                return sales_rep[key]
+        combined = f"{sales_rep.get('first_name', '')} {sales_rep.get('family_name') or sales_rep.get('last_name', '')}".strip()
+        if combined:
+            return combined
+    return str(sales_rep)
 
 
 def get_client_info(project):
@@ -995,6 +1050,19 @@ def circular_mean_degrees(angles_deg: list) -> float:
     return math.degrees(math.atan2(sx, sy)) % 360
 
 
+def panel_centroid_lambert93(design) -> tuple:
+    """Centroide simple (moyenne des coins) du champ de panneaux, en
+    Lambert-93. Utilise pour centrer le plan de masse (DP2) sur les
+    panneaux plutot que sur le point d'adresse geocode."""
+    origin_lon, origin_lat = design["object"]["userData"]["sceneOrigin4326"]
+    x0, y0 = lambert93_forward(origin_lon, origin_lat)
+    panels = find_panels(design["object"])
+    if not panels:
+        raise RuntimeError("Aucun panneau trouve : impossible de centrer le plan de masse.")
+    all_pts = [(x0 + cx, y0 + cy) for p in panels for cx, cy in p["corners_local"]]
+    return sum(p[0] for p in all_pts) / len(all_pts), sum(p[1] for p in all_pts) / len(all_pts)
+
+
 def compute_panel_tight_view(design, map_width_mm=210.0, map_height_mm=170.0, margin=1.3):
     """
     Calcule une emprise "zoomee au maximum" sur le champ de panneaux,
@@ -1219,12 +1287,24 @@ def run_pipeline(
         raise RuntimeError("Champ 'design' absent (Raw Data API Access desactive, ou design non finalise).")
     design = json.loads(gzip.decompress(base64.b64decode(raw_design)).decode("utf-8"))
     nb_panneaux = update_panels(ogr2ogr_path, design, project_dir / "Panneaux.gpkg")
+
+    # DP2 (plan de masse) recentre sur le centroide reel des panneaux --
+    # l'adresse geocodee (x0,y0) n'est qu'un point de reference administratif,
+    # pas forcement au centre du batiment/toiture.
+    cx, cy = panel_centroid_lambert93(design)
+    extents[PLAN_MASSE_SCALE] = compute_extents(cx, cy, [PLAN_MASSE_SCALE])[PLAN_MASSE_SCALE]
+
+    # calcule ici (plutot que juste avant build_project_qgz) car rotation_deg
+    # sert aussi a orienter l'image DP6 ci-dessous
+    toiture_view = compute_panel_tight_view(design)
+    rotation_deg = toiture_view[-1]
+
     update_project_marker(ogr2ogr_path, geo["lon"], geo["lat"], project_dir / "Projet.gpkg")
     update_panel_dimensions(ogr2ogr_path, design, project_dir / "Cotes_panneaux.gpkg")
     update_panel_annotation(ogr2ogr_path, design, project_dir / "Annotation_panneaux.gpkg", dp_type, nb_panneaux, extents[PLAN_MASSE_SCALE])
 
     try:
-        update_system_image(session, org_id, project_id, token, system_obj.get("uuid"), project_dir / "Rendu_systeme.jpg")
+        update_system_image(session, org_id, project_id, token, system_obj.get("uuid"), project_dir / "Rendu_systeme.jpg", rotation_deg=rotation_deg)
     except Exception as exc:
         log(f"  ATTENTION : image du systeme non recuperee, ignoree ({exc})")
 
@@ -1246,9 +1326,9 @@ def run_pipeline(
         "dp_moa_nom": client["nom_moa"],
         "dp_moa_adresse": moa_adresse,
         "dp_nb_panneaux": nb_panneaux,
+        "dp_auteur": get_project_author(project),
     }
     out_qgz = Path(out) if out else project_dir / f"{safe_name}.qgz"
-    toiture_view = compute_panel_tight_view(design)
     build_project_qgz(Path(template), out_qgz, dp_variables, extents, toiture_view)
 
     log(f"\nOK : {out_qgz}")
