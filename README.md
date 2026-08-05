@@ -40,7 +40,11 @@ doublon d'id) dans `templates/modele_DP_v4.2.qgz`.
 
 ## Activer le Palier 2 (export PDF) -- a faire dans cet ordre
 
-1. Decommente `qgis`, `python3-qgis`, `xvfb` dans `packages.txt`.
+1. Ajoute `qgis`, `python3-qgis` et `xvfb` dans `packages.txt` (un par
+   ligne, sans commentaire -- Community Cloud ne supporte PAS les lignes
+   `#` dans ce fichier : chaque mot de chaque ligne est installe tel quel
+   par `apt-get`, commentaires compris, ce qui provoque des erreurs
+   `Unable to locate package`).
 2. Deploie et regarde les logs de build : QGIS est un paquet volumineux,
    verifie que le build ne timeout pas et que l'app demarre.
 3. Dans un terminal sur la meme machine (ou en local avec QGIS installe),

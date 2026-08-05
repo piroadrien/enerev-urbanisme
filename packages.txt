@@ -1,11 +1,1 @@
-# Obligatoire pour le Palier 1 (production du .qgz) : ogr2ogr est utilise
-# pour convertir/assembler les couches cadastre + panneaux en GeoPackage.
 gdal-bin
-
-# Palier 2 (export des 6 PDF) -- a decommenter pour tester :
-# ATTENTION : tres lourd (Qt, X11...), peut depasser les limites de
-# Community Cloud (~1 Go de RAM). Voir README.md pour le plan de repli
-# (delegation de cette etape a GitHub Actions) si ca ne tient pas.
-# qgis
-# python3-qgis
-# xvfb
