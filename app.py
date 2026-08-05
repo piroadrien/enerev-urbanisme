@@ -32,16 +32,18 @@ with st.form("dp_form"):
     moa_adresse = st.text_input("Adresse du MOA si differente de l'adresse du site (optionnel)")
     submitted = st.form_submit_button("Generer le dossier")
 
+if "dp_result" not in st.session_state:
+    st.session_state.dp_result = None
+
 if submitted:
     if not project_id.strip():
         st.error("Merci de renseigner un numero de projet.")
         st.stop()
 
+    st.session_state.dp_result = None  # efface le resultat precedent tant que le nouveau n'est pas pret
     status = st.status("Generation en cours...", expanded=True)
-    log_lines = []
 
     def log(msg):
-        log_lines.append(str(msg))
         status.write(msg)
 
     try:
@@ -63,7 +65,6 @@ if submitted:
             )
 
             status.update(label="Termine !", state="complete")
-            st.success("Dossier genere avec succes.")
 
             project_dir = out_qgz.parent
 
@@ -73,36 +74,58 @@ if submitted:
             # a l'ouverture (couches introuvables).
             zip_base = Path(tmp) / project_dir.name
             zip_path = shutil.make_archive(str(zip_base), "zip", root_dir=project_dir)
-
             with open(zip_path, "rb") as f:
-                st.download_button(
-                    f"⬇️ Telecharger le dossier complet ({project_dir.name}.zip)",
-                    data=f.read(),
-                    file_name=f"{project_dir.name}.zip",
-                    mime="application/zip",
-                )
-            st.caption("Contient le .qgz et tous les fichiers de donnees associes (cadastre, panneaux, photos) -- decompresse tout dans un meme dossier avant d'ouvrir le .qgz.")
+                zip_bytes = f.read()
 
             # Palier 2 -- export des 6 PDF (DP1/DP2/DP4/DP6/DP7/DP8).
-            # NON VALIDE (voir pdf_export.py) : necessite QGIS installe sur
-            # le serveur (packages.txt) ET un ALGORITHM_ID confirme. Tant
-            # que ce n'est pas fait, on l'indique clairement plutot que de
-            # planter ou de proposer un bouton qui ne marchera pas.
+            pdf_bytes = {}
+            pdf_error = None
             try:
                 from pdf_export import export_dp_pdfs
                 pdf_dir = Path(tmp) / "pdfs"
                 pdfs = export_dp_pdfs(out_qgz, pdf_dir)
-                st.subheader("Dossiers DP (PDF)")
                 for label, pdf_path in sorted(pdfs.items()):
                     with open(pdf_path, "rb") as f:
-                        st.download_button(f"⬇️ {label}.pdf", f.read(), file_name=f"{label}.pdf", mime="application/pdf")
-            except ImportError:
-                st.info("Export PDF pas encore active sur cet environnement (Palier 2 en cours de validation -- voir README).")
+                        pdf_bytes[label] = f.read()
             except Exception as exc:
-                st.warning(f"Export PDF indisponible : {exc}")
+                pdf_error = str(exc)
+
+            # On garde tout en memoire (bytes) dans session_state -- le
+            # dossier temporaire (tmp) est detruit a la sortie du 'with',
+            # donc il ne faut PAS y stocker de chemins, seulement le
+            # contenu deja lu.
+            st.session_state.dp_result = {
+                "zip_name": f"{project_dir.name}.zip",
+                "zip_bytes": zip_bytes,
+                "pdf_bytes": pdf_bytes,
+                "pdf_error": pdf_error,
+            }
 
     except Exception as exc:
         status.update(label="Erreur", state="error")
         st.error(f"Erreur : {exc}")
         with st.expander("Detail technique"):
             st.code(traceback.format_exc())
+
+# Affiche les telechargements a partir de session_state -- en dehors du
+# bloc 'if submitted', pour que les boutons restent visibles/fonctionnels
+# meme apres le rerun declenche par un clic sur un download_button.
+result = st.session_state.dp_result
+if result:
+    st.success("Dossier genere avec succes.")
+
+    st.download_button(
+        f"⬇️ Telecharger le dossier complet ({result['zip_name']})",
+        data=result["zip_bytes"],
+        file_name=result["zip_name"],
+        mime="application/zip",
+        key="dl_zip",
+    )
+    st.caption("Contient le .qgz et tous les fichiers de donnees associes (cadastre, panneaux, photos) -- decompresse tout dans un meme dossier avant d'ouvrir le .qgz.")
+
+    if result["pdf_bytes"]:
+        st.subheader("Dossiers DP (PDF)")
+        for label, data in sorted(result["pdf_bytes"].items()):
+            st.download_button(f"⬇️ {label}.pdf", data=data, file_name=f"{label}.pdf", mime="application/pdf", key=f"dl_{label}")
+    elif result["pdf_error"]:
+        st.warning(f"Export PDF indisponible : {result['pdf_error']}")
