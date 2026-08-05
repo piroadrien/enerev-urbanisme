@@ -19,6 +19,7 @@ Usage prevu (une fois valide) :
     # -> {"DP1": Path(".../DP1.pdf"), "DP2": Path(...), ...}
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -26,6 +27,11 @@ REPORT_NAMES = ["DP 1", "DP 2", "DP 4", "DP 6", "DP 7", "DP 8"]
 
 # A CONFIRMER localement (voir docstring) avant d'utiliser ce module.
 ALGORITHM_ID = "native:printlayouttopdf"
+
+# QGIS/Qt a besoin d'un affichage meme en mode "headless". Plutot que
+# d'installer un serveur X virtuel (xvfb), on force le plugin Qt
+# "offscreen", qui ne necessite aucune dependance systeme supplementaire.
+_HEADLESS_ENV = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
 
 
 def export_dp_pdfs(qgz_path: Path, output_dir: Path, qgis_process_bin: str = "qgis_process") -> dict:
@@ -44,7 +50,7 @@ def export_dp_pdfs(qgz_path: Path, output_dir: Path, qgis_process_bin: str = "qg
             f"--LAYOUT={report_name}",
             f"--OUTPUT={out_pdf}",
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=_HEADLESS_ENV)
         if proc.returncode != 0 or not out_pdf.exists():
             raise RuntimeError(
                 f"Echec export {report_name} :\n"
