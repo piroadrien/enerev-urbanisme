@@ -64,7 +64,7 @@ def _find_python_with_qgis() -> str:
 
 _WORKER_SCRIPT = """
 import sys, json
-from qgis.core import QgsApplication, QgsProject, QgsLayoutExporter
+from qgis.core import QgsApplication, QgsProject, QgsLayoutExporter, QgsReport
 
 qgz_path, output_dir, report_names_json = sys.argv[1], sys.argv[2], sys.argv[3]
 report_names = json.loads(report_names_json)
@@ -78,21 +78,39 @@ if not project.read(qgz_path):
     qgs.exitQgis()
     sys.exit(1)
 
-reports_by_name = {r.name(): r for r in project.reportManager().reports()}
+# Les Rapports (QgsReport) ET les mises en page classiques (QgsPrintLayout)
+# vivent tous les deux dans layoutManager() -- il n'y a pas de
+# reportManager() separe dans cette version de QGIS.
+manager = project.layoutManager()
+available_names = [item.name() for item in manager.layouts()]
+
 results = {}
 for name in report_names:
     label = name.replace(" ", "")
-    report = reports_by_name.get(name)
-    if report is None:
-        results[label] = {"ok": False, "error": f"Rapport '{name}' introuvable (rapports presents : {list(reports_by_name)})"}
+    obj = manager.layoutByName(name)
+    if obj is None:
+        results[label] = {"ok": False, "error": f"'{name}' introuvable (elements presents : {available_names})"}
         continue
+
     out_pdf = f"{output_dir}/{label}.pdf"
     settings = QgsLayoutExporter.PdfExportSettings()
-    result, error_msg = QgsLayoutExporter.exportToPdf(report, out_pdf, settings)
-    if int(result) == 0:  # Success vaut toujours 0 dans cet enum, quelle que soit la version QGIS (API du chemin scope differente selon les versions : QgsLayoutExporter.Success vs .ExportResult.Success)
-        results[label] = {"ok": True, "path": out_pdf}
-    else:
-        results[label] = {"ok": False, "error": str(error_msg)}
+
+    try:
+        if isinstance(obj, QgsReport):
+            # Rapport : export via la methode statique prenant un iterateur
+            result, error_msg = QgsLayoutExporter.exportToPdf(obj, out_pdf, settings)
+        else:
+            # Mise en page classique : export via une instance de l'exporteur
+            exporter = QgsLayoutExporter(obj)
+            result = exporter.exportToPdf(out_pdf, settings)
+            error_msg = ""
+
+        if int(result) == 0:  # Success vaut toujours 0
+            results[label] = {"ok": True, "path": out_pdf}
+        else:
+            results[label] = {"ok": False, "error": str(error_msg) or f"code erreur {result}"}
+    except Exception as exc:
+        results[label] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 qgs.exitQgis()
 print(json.dumps(results))
