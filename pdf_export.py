@@ -19,6 +19,7 @@ Usage prevu :
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -28,6 +29,38 @@ REPORT_NAMES = ["DP 1", "DP 2", "DP 4", "DP 6", "DP 7", "DP 8"]
 # d'installer un serveur X virtuel (xvfb), on force le plugin Qt
 # "offscreen", qui ne necessite aucune dependance systeme supplementaire.
 _HEADLESS_ENV = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
+
+# Candidats a essayer, dans l'ordre : le 'python3' de Streamlit (resolu via
+# PATH) n'est PAS forcement celui ou l'apt-get de python3-qgis a installe
+# ses bindings (Community Cloud execute l'app dans un venv separe du
+# python3 systeme) -- on essaie donc explicitement les emplacements
+# habituels de l'interpreteur systeme Debian avant de se rabattre sur
+# 'python3' simple.
+_PYTHON_CANDIDATES = [
+    "/usr/bin/python3",
+    "/usr/bin/python3.11",
+    "/usr/bin/python3.12",
+    "python3",
+]
+
+
+def _find_python_with_qgis() -> str:
+    tried = []
+    for candidate in _PYTHON_CANDIDATES:
+        exe = candidate if Path(candidate).is_absolute() else shutil.which(candidate)
+        if not exe or not Path(exe).exists():
+            tried.append(f"{candidate} (introuvable)")
+            continue
+        check = subprocess.run([exe, "-c", "import qgis.core"], capture_output=True, text=True, env=_HEADLESS_ENV)
+        if check.returncode == 0:
+            return exe
+        tried.append(f"{exe} ({check.stderr.strip().splitlines()[-1] if check.stderr else 'echec'})")
+
+    raise RuntimeError(
+        "Aucun interpreteur Python avec le module 'qgis' trouve. Essaye : " + " | ".join(tried) +
+        ". Verifie que 'python3-qgis' est bien installe (packages.txt) et localise le bon binaire "
+        "(ex: 'dpkg -L python3-qgis | grep site-packages' dans un shell sur la meme machine)."
+    )
 
 _WORKER_SCRIPT = """
 import sys, json
@@ -66,10 +99,12 @@ print(json.dumps(results))
 """
 
 
-def export_dp_pdfs(qgz_path: Path, output_dir: Path, python_bin: str = "python3") -> dict:
+def export_dp_pdfs(qgz_path: Path, output_dir: Path, python_bin: str = None) -> dict:
     qgz_path = Path(qgz_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    python_bin = python_bin or _find_python_with_qgis()
 
     script_path = output_dir / "_pyqgis_worker.py"
     script_path.write_text(_WORKER_SCRIPT, encoding="utf-8")
