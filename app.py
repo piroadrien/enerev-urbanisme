@@ -20,6 +20,7 @@ from pathlib import Path
 import streamlit as st
 
 from generate_dp import run_pipeline
+from cerfa_export import build_gnau_package
 
 st.set_page_config(page_title="Generateur de dossier DP", page_icon="📐")
 st.title("📐 Generateur de dossier DP")
@@ -49,7 +50,7 @@ if submitted:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp) / "projets"
-            out_qgz = run_pipeline(
+            result = run_pipeline(
                 project_id=project_id.strip(),
                 dp_type=dp_type,
                 template=str(Path(__file__).parent / "templates" / "modele_DP_v4.2.qgz"),
@@ -66,7 +67,7 @@ if submitted:
 
             status.update(label="Termine !", state="complete", expanded=True)
 
-            project_dir = out_qgz.parent
+            project_dir = result.project_dir
 
             # .qgz + tous ses fichiers de donnees (.gpkg, .jpg) sont
             # references par chemin relatif depuis le .qgz -- il faut les
@@ -77,18 +78,35 @@ if submitted:
             with open(zip_path, "rb") as f:
                 zip_bytes = f.read()
 
-            # Palier 2 -- export des 6 PDF (DP1/DP2/DP4/DP6/DP7/DP8).
+            # Palier 2 -- export des 6 PDF (DP1/DP2/DP4/DP6/DP7/DP8), puis
+            # assemblage du zip pret a importer dans GNAU (cerfa + pieces).
             pdf_bytes = {}
             pdf_error = None
+            gnau_zip_bytes = None
+            gnau_zip_name = None
             try:
                 from pdf_export import export_dp_pdfs
                 pdf_dir = Path(tmp) / "pdfs"
-                pdfs = export_dp_pdfs(out_qgz, pdf_dir)
+                pdfs = export_dp_pdfs(result.qgz, pdf_dir)
                 for label, pdf_path in sorted(pdfs.items()):
                     with open(pdf_path, "rb") as f:
                         pdf_bytes[label] = f.read()
+
+                gnau_zip_path = build_gnau_package(
+                    Path(tmp) / f"{project_dir.name}_gnau.zip",
+                    result.cerfa,
+                    pdfs,
+                )
+                gnau_zip_name = f"{project_dir.name}_gnau.zip"
+                with open(gnau_zip_path, "rb") as f:
+                    gnau_zip_bytes = f.read()
             except Exception as exc:
                 pdf_error = str(exc)
+
+            # CERFA seul (toujours disponible, meme si l'export QGIS headless
+            # a echoue -- il ne depend pas de pdf_export.py).
+            with open(result.cerfa, "rb") as f:
+                cerfa_bytes = f.read()
 
             # On garde tout en memoire (bytes) dans session_state -- le
             # dossier temporaire (tmp) est detruit a la sortie du 'with',
@@ -97,8 +115,11 @@ if submitted:
             st.session_state.dp_result = {
                 "zip_name": f"{project_dir.name}.zip",
                 "zip_bytes": zip_bytes,
+                "cerfa_bytes": cerfa_bytes,
                 "pdf_bytes": pdf_bytes,
                 "pdf_error": pdf_error,
+                "gnau_zip_name": gnau_zip_name,
+                "gnau_zip_bytes": gnau_zip_bytes,
             }
 
     except Exception as exc:
@@ -114,18 +135,51 @@ result = st.session_state.dp_result
 if result:
     st.success("Dossier genere avec succes.")
 
-    st.download_button(
-        f"⬇️ Telecharger le dossier complet ({result['zip_name']})",
-        data=result["zip_bytes"],
-        file_name=result["zip_name"],
-        mime="application/zip",
-        key="dl_zip",
+    choix = st.radio(
+        "Que veux-tu telecharger ?",
+        ["Projet QGIS (.qgz + donnees)", "Dossier GNAU pret a importer (.zip)"],
+        horizontal=True,
     )
-    st.caption("Contient le .qgz et tous les fichiers de donnees associes (cadastre, panneaux, photos) -- decompresse tout dans un meme dossier avant d'ouvrir le .qgz.")
 
-    if result["pdf_bytes"]:
-        st.subheader("Dossiers DP (PDF)")
-        for label, data in sorted(result["pdf_bytes"].items()):
-            st.download_button(f"⬇️ {label}.pdf", data=data, file_name=f"{label}.pdf", mime="application/pdf", key=f"dl_{label}")
-    elif result["pdf_error"]:
-        st.warning(f"Export PDF indisponible : {result['pdf_error']}")
+    if choix == "Projet QGIS (.qgz + donnees)":
+        st.download_button(
+            f"⬇️ Telecharger le dossier complet ({result['zip_name']})",
+            data=result["zip_bytes"],
+            file_name=result["zip_name"],
+            mime="application/zip",
+            key="dl_zip",
+        )
+        st.caption("Contient le .qgz et tous les fichiers de donnees associes (cadastre, panneaux, photos) -- decompresse tout dans un meme dossier avant d'ouvrir le .qgz.")
+
+    else:
+        if result["gnau_zip_bytes"]:
+            st.download_button(
+                f"⬇️ Telecharger le dossier GNAU ({result['gnau_zip_name']})",
+                data=result["gnau_zip_bytes"],
+                file_name=result["gnau_zip_name"],
+                mime="application/zip",
+                key="dl_gnau_zip",
+            )
+            st.caption(
+                "Contient cerfa_DPC_1_1.pdf, DPC1_1_1.pdf, DPC2_1_1.pdf, DPC4_1_1.pdf, "
+                "DPC6_1_1.pdf, DPC7_1_1.pdf et DPC8_1_1.pdf -- a deposer tel quel via "
+                "\"Importer le dossier\" > \"Import du formulaire et des pieces\" sur GNAU."
+            )
+        else:
+            st.warning(
+                "Export des 6 PDF (DP1/2/4/6/7/8) indisponible pour l'instant"
+                + (f" : {result['pdf_error']}" if result["pdf_error"] else "")
+                + " -- le CERFA seul reste telechargeable ci-dessous."
+            )
+            st.download_button(
+                "⬇️ Telecharger le CERFA seul (cerfa_DPC_1_1.pdf)",
+                data=result["cerfa_bytes"],
+                file_name="cerfa_DPC_1_1.pdf",
+                mime="application/pdf",
+                key="dl_cerfa_only",
+            )
+            st.caption(
+                "En attendant que l'export QGIS headless (pdf_export.py) soit valide : "
+                "exporte DP1/DP2/DP4/DP6/DP7/DP8 manuellement depuis le .qgz, puis "
+                "zippe-les avec ce CERFA sous les noms DPC1_1_1.pdf ... DPC8_1_1.pdf."
+            )

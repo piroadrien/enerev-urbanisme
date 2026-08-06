@@ -30,6 +30,7 @@ Pre-requis :
 
 import argparse
 import base64
+from dataclasses import dataclass
 import glob
 import gzip
 import json
@@ -311,6 +312,12 @@ def geocode(session, adresse: str, postcode: str = None) -> dict:
     return {
         "label": props.get("label"), "score": props.get("score"), "type": props.get("type"),
         "citycode": props.get("citycode"), "lon": lon, "lat": lat,
+        # ajoutes pour le CERFA (T2Q/T2V/T2C/T2L) -- deja renvoyes par la BAN,
+        # jetes jusqu'ici :
+        "housenumber": props.get("housenumber"),
+        "street": props.get("street"),
+        "postcode": props.get("postcode"),
+        "city": props.get("city"),
     }
 
 
@@ -1210,6 +1217,13 @@ def build_project_qgz(template_qgz: Path, out_qgz: Path, dp_variables: dict, ext
 # MAIN
 # ═════════════════════════════════════════════════════════════
 
+@dataclass
+class PipelineResult:
+    qgz: Path            # projet QGIS + fichiers de donnees associes (project_dir)
+    cerfa: Path           # CERFA rempli (cerfa_DPC_1_1.pdf), pret pour build_gnau_package()
+    project_dir: Path
+
+
 def run_pipeline(
     project_id, dp_type, template, work_dir,
     org_id=None, token=None, username=None, password=None, mfa=None,
@@ -1270,10 +1284,23 @@ def run_pipeline(
     project_dir.mkdir(parents=True, exist_ok=True)
     log(f"  dossier du projet : {project_dir}")
 
-    log("[4/7] Mise a jour du cadastre...")
-    update_cadastre(session, ogr2ogr_path, geo["citycode"], project_dir / "Données cadastrales.gpkg")
+    log("[4/8] Mise a jour du cadastre...")
+    cadastre_gpkg = project_dir / "Données cadastrales.gpkg"
+    update_cadastre(session, ogr2ogr_path, geo["citycode"], cadastre_gpkg)
 
-    log("[5/7] Extraction des panneaux + marqueur de localisation...")
+    log("[5/8] Recherche de la parcelle cadastrale...")
+    from parcelle_lookup import find_parcelle
+    parcelle = find_parcelle(cadastre_gpkg, ogr2ogr_path, geo["lon"], geo["lat"])
+    if parcelle is None:
+        raise RuntimeError("Aucune parcelle cadastrale trouvee au point geocode -- verifie l'adresse.")
+    if not parcelle["certain"]:
+        log(f"  ATTENTION : point hors de toute parcelle, parcelle la plus proche retenue "
+            f"({parcelle['section']} {parcelle['numero']}) -- A VERIFIER MANUELLEMENT.")
+    else:
+        log(f"  parcelle : section {parcelle['section']}, numero {parcelle['numero']}, "
+            f"{parcelle['superficie']} m2")
+
+    log("[6/8] Extraction des panneaux + marqueur de localisation...")
     raw_design = project.get("design")
     if not raw_design:
         raise RuntimeError("Champ 'design' absent (Raw Data API Access desactive, ou design non finalise).")
@@ -1300,7 +1327,7 @@ def run_pipeline(
     except Exception as exc:
         log(f"  ATTENTION : image du systeme non recuperee, ignoree ({exc})")
 
-    log("[6/7] Photos Street View (DP7/DP8)...")
+    log("[7/8] Photos Street View (DP7/DP8)...")
     if google_api_key:
         try:
             update_streetview_photos(geo["lat"], geo["lon"], google_api_key, project_dir)
@@ -1310,7 +1337,7 @@ def run_pipeline(
     else:
         log("  ignore (pas de google_api_key fourni)")
 
-    log("[7/7] Duplication du template...")
+    log("[8/8] Duplication du template + generation du CERFA...")
     dp_variables = {
         "dp_type": dp_type,
         "dp_taille_kwc": round(float(kwc), 2) if kwc is not None else "",
@@ -1323,8 +1350,26 @@ def run_pipeline(
     out_qgz = Path(out) if out else project_dir / f"{safe_name}.qgz"
     build_project_qgz(Path(template), out_qgz, dp_variables, extents, toiture_view)
 
+    from cerfa_export import ProjectCerfaData, build_cerfa_field_values, fill_cerfa
+    cerfa_data = ProjectCerfaData(
+        nb_panneaux=nb_panneaux,
+        puissance_crete_kwc=float(kwc) if kwc is not None else 0.0,
+        numero_voie=geo.get("housenumber") or "",
+        nom_voie=geo.get("street") or "",
+        code_postal=geo.get("postcode") or "",
+        localite=geo.get("city") or "",
+        section_cadastrale=parcelle["section"],
+        numero_cadastral=parcelle["numero"],
+        superficie_parcelle_m2=parcelle["superficie"],
+        prefixe_cadastral=parcelle["prefixe"],
+    )
+    cerfa_values = build_cerfa_field_values(cerfa_data)
+    cerfa_template = Path(template).parent / "cerfa_DPC_1_1.pdf"
+    cerfa_pdf = project_dir / "cerfa_DPC_1_1.pdf"
+    fill_cerfa(cerfa_template, cerfa_pdf, cerfa_values)
+
     log(f"\nOK : {out_qgz}")
-    return out_qgz
+    return PipelineResult(qgz=out_qgz, cerfa=cerfa_pdf, project_dir=project_dir)
 
 
 def main():
@@ -1346,7 +1391,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        out_qgz = run_pipeline(
+        result = run_pipeline(
             project_id=args.project_id, dp_type=args.type, template=args.template, work_dir=args.work_dir,
             org_id=args.org_id, token=args.token, username=args.username, password=args.password, mfa=args.mfa,
             system=args.system, moa_adresse=args.moa_adresse, postcode=args.postcode,
@@ -1356,7 +1401,8 @@ def main():
         print(f"\nErreur : {exc}", file=sys.stderr)
         sys.exit(1)
 
-    print("Ouvre ce fichier dans QGIS, verifie le rendu, puis exporte le layout en PDF.")
+    print(f"CERFA rempli : {result.cerfa}")
+    print("Ouvre le .qgz dans QGIS, verifie le rendu, puis exporte le layout en PDF.")
 
 
 if __name__ == "__main__":
