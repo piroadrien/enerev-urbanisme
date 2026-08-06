@@ -1288,19 +1288,7 @@ def run_pipeline(
     cadastre_gpkg = project_dir / "Données cadastrales.gpkg"
     update_cadastre(session, ogr2ogr_path, geo["citycode"], cadastre_gpkg)
 
-    log("[5/8] Recherche de la parcelle cadastrale...")
-    from parcelle_lookup import find_parcelle
-    parcelle = find_parcelle(cadastre_gpkg, ogr2ogr_path, geo["lon"], geo["lat"])
-    if parcelle is None:
-        raise RuntimeError("Aucune parcelle cadastrale trouvee au point geocode -- verifie l'adresse.")
-    if not parcelle["certain"]:
-        log(f"  ATTENTION : point hors de toute parcelle, parcelle la plus proche retenue "
-            f"({parcelle['section']} {parcelle['numero']}) -- A VERIFIER MANUELLEMENT.")
-    else:
-        log(f"  parcelle : section {parcelle['section']}, numero {parcelle['numero']}, "
-            f"{parcelle['superficie']} m2")
-
-    log("[6/8] Extraction des panneaux + marqueur de localisation...")
+    log("[5/8] Extraction des panneaux + marqueur de localisation...")
     raw_design = project.get("design")
     if not raw_design:
         raise RuntimeError("Champ 'design' absent (Raw Data API Access desactive, ou design non finalise).")
@@ -1317,6 +1305,23 @@ def run_pipeline(
     # sert aussi a orienter l'image DP6 ci-dessous
     toiture_view = compute_panel_tight_view(design)
     rotation_deg = toiture_view[-1]
+
+    log("[6/8] Recherche de la parcelle cadastrale...")
+    # Sur le centroide reel des panneaux (Lambert-93), pas sur l'adresse
+    # geocodee -- celle-ci pointe l'entree/boite aux lettres et peut tomber
+    # sur une parcelle annexe (allee, servitude) au lieu de la parcelle du
+    # batiment. Le centroide du toit est beaucoup plus fiable.
+    from parcelle_lookup import find_parcelle
+    parcelle = find_parcelle(cadastre_gpkg, ogr2ogr_path, cx, cy)
+    if parcelle is None:
+        raise RuntimeError("Aucune parcelle cadastrale trouvee au centroide du toit -- verifie l'adresse/le design.")
+    if not parcelle["certain"]:
+        log(f"  ATTENTION : centroide hors de toute parcelle, parcelle la plus proche retenue "
+            f"({parcelle['section']} {parcelle['numero']}) -- A VERIFIER MANUELLEMENT.")
+    else:
+        log(f"  parcelle : section {parcelle['section']}, numero {parcelle['numero']}, "
+            f"{parcelle['superficie']} m2")
+
 
     update_project_marker(ogr2ogr_path, geo["lon"], geo["lat"], project_dir / "Projet.gpkg")
     update_panel_dimensions(ogr2ogr_path, design, project_dir / "Cotes_panneaux.gpkg")
