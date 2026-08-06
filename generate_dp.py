@@ -1261,6 +1261,13 @@ def run_pipeline(
         raise RuntimeError("Aucun systeme trouve pour ce projet.")
     kwc = system_obj.get("kw_stc")
     client = get_client_info(project)
+    # DIAGNOSTIC TEMPORAIRE -- a retirer une fois le bon champ identifie :
+    # "sales_rep" ne semble pas exister (le "Vendeur" est un role dans une
+    # liste de membres d'equipe cote OpenSolar, pas un champ simple).
+    role_like_keys = [k for k in project if "role" in k.lower() or "team" in k.lower() or "member" in k.lower() or "rep" in k.lower() or "assign" in k.lower()]
+    log(f"  [diagnostic auteur] cles du projet contenant role/team/member/rep/assign : {role_like_keys}")
+    for k in role_like_keys:
+        log(f"  [diagnostic auteur] project['{k}'] = {project.get(k)!r}")
     moa_adresse = moa_adresse or client["adresse_site"]
     log(f"  {client['nom_moa']} — {client['adresse_site']} — {kwc} kWc")
 

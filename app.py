@@ -64,7 +64,7 @@ if submitted:
                 log=log,
             )
 
-            status.update(label="Termine !", state="complete")
+            status.update(label="Termine !", state="complete", expanded=True)
 
             project_dir = out_qgz.parent
 
