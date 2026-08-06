@@ -131,7 +131,7 @@ def get_project_data(session, org_id, project_id, token):
     return r.json()
 
 
-def update_system_image(session, org_id, project_id, token, system_uuid, out_path, rotation_deg=None, width=1600, height=1200):
+def update_system_image(session, org_id, project_id, token, system_uuid, out_path, rotation_deg=None, width=2400, height=1800):
     """
     Recupere l'image du systeme (calepinage/rendu) directement depuis
     OpenSolar -- endpoint simple et synchrone, deja utilise et eprouve
@@ -155,30 +155,39 @@ def update_system_image(session, org_id, project_id, token, system_uuid, out_pat
     print(f"  image du systeme recuperee ({len(r.content)} octets){' + pivotee' if rotation_deg else ''}")
 
 
-def rotate_image_bytes(image_bytes: bytes, mapRotation_deg: float) -> bytes:
+def rotate_image_bytes(image_bytes: bytes, mapRotation_deg: float, zoom_factor: float = 1.6) -> bytes:
     """
-    Pivote une image raster (JPEG) pour l'aligner comme les cartes DP4 --
-    meme angle 'rotation_deg' que compute_panel_tight_view (convention
-    mapRotation de QGIS, deja validee empiriquement pour les cartes
-    vectorielles).
-
-    ATTENTION -- NON VALIDE VISUELLEMENT sur une image raster : PIL fait
-    tourner une image dans le sens ANTI-horaire pour un angle positif,
-    alors que la convention mapRotation de QGIS semble etre horaire (a
-    confirmer). Hypothese de depart ici : angle PIL = -mapRotation_deg (on
-    inverse pour compenser le sens oppose). A verifier visuellement sur le
-    premier essai -- si le rendu est a l'envers, inverser le signe
-    (utiliser +mapRotation_deg au lieu de -mapRotation_deg).
+    Pivote une image raster (JPEG) pour l'aligner comme les cartes DP4
+    (angle 'rotation_deg' valide visuellement -- meme sens que mapRotation
+    QGIS), puis recadre au centre pour :
+      1) eliminer les zones blanches introduites par la rotation (en ne
+         gardant qu'un carre garanti entierement dans la zone couverte par
+         l'image d'origine, quel que soit l'angle) ;
+      2) zoomer davantage sur le centre (les panneaux, puisqu'OpenSolar
+         centre le systeme dans son rendu) via 'zoom_factor' (>1 = plus
+         serre). Augmente zoom_factor pour se rapprocher encore plus des
+         panneaux, diminue-le si le recadrage est trop serre.
     """
+    import math
     from io import BytesIO
     from PIL import Image
 
     img = Image.open(BytesIO(image_bytes))
-    pil_angle = -mapRotation_deg  # hypothese a confirmer (voir docstring)
-    rotated = img.rotate(pil_angle, expand=True, fillcolor="white")
+    w, h = img.size
+
+    rotated = img.rotate(-mapRotation_deg, expand=True, fillcolor="white")
+
+    # plus grand carre garanti sans zone blanche, quel que soit l'angle :
+    # cote = plus petite dimension d'origine / racine(2)
+    inscribed_side = min(w, h) / math.sqrt(2)
+    crop_side = inscribed_side / zoom_factor
+
+    cx, cy = rotated.width / 2, rotated.height / 2
+    box = (cx - crop_side / 2, cy - crop_side / 2, cx + crop_side / 2, cy + crop_side / 2)
+    cropped = rotated.crop(box)
 
     buf = BytesIO()
-    rotated.convert("RGB").save(buf, format="JPEG", quality=92)
+    cropped.convert("RGB").save(buf, format="JPEG", quality=92)
     return buf.getvalue()
 
 
