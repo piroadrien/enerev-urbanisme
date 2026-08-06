@@ -226,26 +226,9 @@ def choose_system(systems, preselected=None):
 
 
 def get_project_author(project) -> str:
-    """
-    Nom de l'auteur/vendeur du projet, depuis le champ OpenSolar
-    'sales_rep'. La forme exacte de ce champ (chaine simple ou objet
-    imbrique avec prenom/nom) n'a pas pu etre confirmee sans acces direct
-    a l'API -- gere les cas les plus courants ; ajuste cette fonction si
-    le nom ne remonte pas correctement pour ton compte.
-    """
-    sales_rep = project.get("sales_rep")
-    if not sales_rep:
-        return ""
-    if isinstance(sales_rep, str):
-        return sales_rep
-    if isinstance(sales_rep, dict):
-        for key in ("display", "name", "full_name"):
-            if sales_rep.get(key):
-                return sales_rep[key]
-        combined = f"{sales_rep.get('first_name', '')} {sales_rep.get('family_name') or sales_rep.get('last_name', '')}".strip()
-        if combined:
-            return combined
-    return str(sales_rep)
+    """Nom du vendeur assigne au projet (confirme empiriquement : champ
+    OpenSolar 'assigned_salesperson_role_name', simple chaine de caracteres)."""
+    return project.get("assigned_salesperson_role_name") or ""
 
 
 def get_client_info(project):
@@ -1261,13 +1244,6 @@ def run_pipeline(
         raise RuntimeError("Aucun systeme trouve pour ce projet.")
     kwc = system_obj.get("kw_stc")
     client = get_client_info(project)
-    # DIAGNOSTIC TEMPORAIRE -- a retirer une fois le bon champ identifie :
-    # "sales_rep" ne semble pas exister (le "Vendeur" est un role dans une
-    # liste de membres d'equipe cote OpenSolar, pas un champ simple).
-    role_like_keys = [k for k in project if "role" in k.lower() or "team" in k.lower() or "member" in k.lower() or "rep" in k.lower() or "assign" in k.lower()]
-    log(f"  [diagnostic auteur] cles du projet contenant role/team/member/rep/assign : {role_like_keys}")
-    for k in role_like_keys:
-        log(f"  [diagnostic auteur] project['{k}'] = {project.get(k)!r}")
     moa_adresse = moa_adresse or client["adresse_site"]
     log(f"  {client['nom_moa']} — {client['adresse_site']} — {kwc} kWc")
 
