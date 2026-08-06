@@ -1256,10 +1256,10 @@ def run_pipeline(
     if not ogr2ogr_path:
         raise RuntimeError("ogr2ogr introuvable. Lance ce script depuis un environnement QGIS/OSGeo4W.")
 
-    log("[1/7] Authentification OpenSolar...")
+    log("[1/8] Authentification OpenSolar...")
     token, org_id = get_token_and_org(args, session)
 
-    log(f"[2/7] Recuperation du projet {project_id}...")
+    log(f"[2/8] Recuperation du projet {project_id}...")
     project = get_project_data(session, org_id, project_id, token)
     systems = list_systems(session, org_id, project_id, token)
     system_obj = choose_system(systems, preselected=system)
@@ -1270,7 +1270,7 @@ def run_pipeline(
     moa_adresse = moa_adresse or client["adresse_site"]
     log(f"  {client['nom_moa']} — {client['adresse_site']} — {kwc} kWc")
 
-    log("[3/7] Geocodage...")
+    log("[3/8] Geocodage...")
     geo = geocode(session, client["adresse_site"], postcode=postcode)
     log(f"  {geo['label']} (score {geo['score']:.2f}, type={geo['type']}, INSEE={geo['citycode']})")
     x0, y0 = lambert93_forward(geo["lon"], geo["lat"])
