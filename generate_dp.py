@@ -798,16 +798,24 @@ def update_streetview_photos(lat, lon, api_key, work_dir: Path):
 
 def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_length_m=8.0):
     """
-    Reporte le point ET les angles des prises de vue DPC7 (paysage proche,
-    vue de face) et DPC8 (paysage lointain, vues gauche/droite) sur les
-    couches "Vues" (lignes, sans etiquette) / "Vues_Texte" (points, avec
-    etiquette) -- meme pattern fiable a 2 couches que l'annotation des
-    panneaux (cf. update_panel_annotation). Ces 2 couches sont deja
-    cablees dans le template (modele_DP_v4.3.qgz) sur le plan de situation
-    (DP1, cadastrale + routiere) ET le plan de masse (DP2, avant + apres),
-    conformement a l'exigence de l'art. R. 431-10 d) du code de
-    l'urbanisme (voir courrier d'incompletude Osny du 30/06/2026, points
-    DPC1/DPC2).
+    Reporte le point ET les angles des prises de vue DP7 (paysage proche,
+    vue de face) et DP8 (paysage lointain, vues gauche/droite) sur les
+    couches "Vues" (lignes) / "Vues_Texte" (points, avec etiquette et une
+    icone oeil+angle de vue) -- meme pattern fiable a 2 couches que
+    l'annotation des panneaux (cf. update_panel_annotation). Ces 2 couches
+    sont deja cablees dans le template (modele_DP_v4.6.qgz) sur le plan de
+    situation (DP1, cadastrale + routiere -- visible uniquement au zoom le
+    plus serre, cf. visibilite par echelle sur la couche) ET le plan de
+    masse (DP2, avant + apres), conformement a l'exigence de l'art.
+    R. 431-10 d) du code de l'urbanisme (voir courrier d'incompletude Osny
+    du 30/06/2026, points DPC1/DPC2).
+
+    L'icone (templates/dpc_view_icon.svg, teinte "enerev teal") est
+    referencee par chemin relatif depuis le style de "Vues_Texte" -- elle
+    doit donc etre copiee a cote du .qgz genere, comme les .gpkg (voir
+    build_project_qgz : les icones .svg du template sont recopiees en
+    sibling du .qgz de sortie, sans quoi QGIS ne resout pas le chemin
+    relatif et affiche un symbole "manquant" a la place).
 
     Street View prend les 3 photos depuis un seul et meme point (seul le
     cap/heading change) -- une fleche par vue, toutes partant de ce point.
@@ -821,9 +829,9 @@ def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_lengt
         return (camx + dx * arrow_length_m, camy + dy * arrow_length_m)
 
     views = [
-        ("DPC7", street_info["heading_property"]),
-        ("DPC8 (gauche)", street_info["heading_left"]),
-        ("DPC8 (droite)", street_info["heading_right"]),
+        ("DP7", street_info["heading_property"]),
+        ("DP8 gauche", street_info["heading_left"]),
+        ("DP8 droite", street_info["heading_right"]),
     ]
 
     line_features, point_features = [], []
@@ -1562,6 +1570,17 @@ def build_project_qgz(template_qgz: Path, out_qgz: Path, dp_variables: dict, ext
     with zipfile.ZipFile(out_qgz, "w", zipfile.ZIP_DEFLATED) as z:
         for f in tmp_dir.iterdir():
             z.write(f, arcname=f.name)
+
+    # les ressources SVG (icones de symbole, ex: dpc_view_icon.svg) sont
+    # referencees par un chemin RELATIF ("./xxx.svg") dans le style des
+    # couches -- QGIS resout ce chemin par rapport a l'emplacement du .qgz
+    # SUR DISQUE, pas par rapport a son contenu interne au zip (contrairement
+    # a ce qu'on pourrait attendre). Il faut donc aussi en laisser une copie
+    # a cote du .qgz genere (meme repertoire que les .gpkg), sans quoi
+    # l'icone ne se resout pas et QGIS affiche un symbole "manquant" (point
+    # d'interrogation) a la place -- constate en testant avec un vrai QGIS.
+    for svg_file in tmp_dir.glob("*.svg"):
+        shutil.copy2(svg_file, out_qgz.parent / svg_file.name)
 
     # nettoyage best-effort : un echec ici (OneDrive, antivirus...) ne doit pas
     # faire perdre le .qgz deja genere avec succes

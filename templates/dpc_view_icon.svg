@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <g fill="none" stroke="param(fill)" stroke-width="param(outline-width)" stroke-linecap="round" stroke-linejoin="round">
+    <!-- eyelashes -->
+    <line x1="33" y1="17" x2="30" y2="6"/>
+    <line x1="43" y1="12" x2="42" y2="1"/>
+    <line x1="57" y1="12" x2="58" y2="1"/>
+    <line x1="67" y1="17" x2="70" y2="6"/>
+    <!-- eye outline (almond shape) -->
+    <path d="M 15 32 Q 50 6 85 32 Q 50 58 15 32 Z"/>
+    <!-- arrows down to the ground, diverging -->
+    <polyline points="50,50 28,76"/>
+    <polyline points="35,72 28,76 30,68"/>
+    <polyline points="50,50 72,76"/>
+    <polyline points="70,68 72,76 65,72"/>
+    <!-- ground / horizon, slightly peaked -->
+    <polyline points="6,92 50,78 94,92"/>
+  </g>
+  <circle cx="50" cy="32" r="9" fill="param(fill)" stroke="none"/>
+</svg>

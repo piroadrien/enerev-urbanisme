@@ -26,7 +26,7 @@ streamlit run app.py
 ```
 
 Place ton template QGIS nettoye (6 rapports DP1/DP2/DP4/DP6/DP7/DP8, sans
-doublon d'id) dans `templates/modele_DP_v4.2.qgz`.
+doublon d'id) dans `templates/modele_DP_v4.6.qgz`.
 
 ## Deploiement sur Streamlit Community Cloud
 
