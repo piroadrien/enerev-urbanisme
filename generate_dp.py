@@ -294,6 +294,46 @@ def lambert93_forward(lon_deg: float, lat_deg: float) -> tuple:
     return FE + rho * math.sin(theta), FN + rho0 - rho * math.cos(theta)
 
 
+def lambert93_inverse(x: float, y: float) -> tuple:
+    """Inverse de lambert93_forward (EPSG:2154 -> WGS84), memes parametres/
+    ellipsoide. Utilisee pour reconvertir en lon/lat un point calcule en
+    Lambert-93 (ex: centroide du toit) -- notamment pour que le marqueur
+    'Projet' affiche sur le plan de situation corresponde exactement a la
+    parcelle identifiee (et pas a un point geocode voisin, potentiellement
+    sur une parcelle adjacente)."""
+    a = 6378137.0
+    f = 1 / 298.257222101
+    e2 = f * (2 - f)
+    e = math.sqrt(e2)
+    phi0, phi1, phi2 = math.radians(46.5), math.radians(44.0), math.radians(49.0)
+    lambda0 = math.radians(3.0)
+    FE, FN = 700000.0, 6600000.0
+
+    def m(phi):
+        return math.cos(phi) / math.sqrt(1 - e2 * math.sin(phi) ** 2)
+
+    def t(phi):
+        return math.tan(math.pi / 4 - phi / 2) / ((1 - e * math.sin(phi)) / (1 + e * math.sin(phi))) ** (e / 2)
+
+    m1, m2 = m(phi1), m(phi2)
+    t0, t1, t2 = t(phi0), t(phi1), t(phi2)
+    n = (math.log(m1) - math.log(m2)) / (math.log(t1) - math.log(t2))
+    F = m1 / (n * t1 ** n)
+    rho0 = a * F * t0 ** n
+
+    dx, dy = x - FE, rho0 - (y - FN)
+    rho = math.hypot(dx, dy)
+    if n < 0:
+        rho = -rho
+    gamma = math.atan2(dx, dy)
+    lam = lambda0 + gamma / n
+    t_ = (rho / (a * F)) ** (1 / n)
+    phi = math.pi / 2 - 2 * math.atan(t_)
+    for _ in range(6):
+        phi = math.pi / 2 - 2 * math.atan(t_ * ((1 - e * math.sin(phi)) / (1 + e * math.sin(phi))) ** (e / 2))
+    return math.degrees(lam), math.degrees(phi)
+
+
 def geocode(session, adresse: str, postcode: str = None) -> dict:
     params = {"q": adresse, "limit": 3}
     if postcode:
@@ -518,10 +558,66 @@ def _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2):
     dist = math.hypot(px - nx, py - ny)
     n_lon = lon1 + nx / (111320 * math.cos(math.radians(ref_lat)))
     n_lat = lat1 + ny / 110540
-    return n_lat, n_lon, dist, interior
+    return n_lat, n_lon, dist, interior, t
 
 
 STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metadata"
+
+
+def _bearing_smoothed_along_way(geom, seg_index: int, t: float, window_m: float = 10.0) -> float:
+    """Calcule l'azimut LOCAL de la rue en lissant sur une fenetre de
+    +/- window_m le long de la polyligne complete, plutot que sur les 2
+    seuls sommets du segment le plus proche.
+
+    Pourquoi : un sommet OSM proche du point de projection (typiquement la
+    ou la rue amorce une legere cassure/courbe) peut a lui seul biaiser
+    fortement l'azimut si l'on ne regarde QUE le segment le plus proche --
+    l'azimut obtenu penche alors vers la direction de la cassure plutot que
+    vers l'orientation generale de la rue devant la propriete (cf. courrier
+    d'incompletude Osny du 30/06/2026, DPC7/DPC8 : "on dirait que tu as
+    pris l'azimut de la rue un peu plus a droite, car il y a une cassure
+    pas loin de l'adresse"). Lisser sur ~20 m de rue de part et d'autre du
+    point de projection attenue ce biais tout en restant local.
+    """
+    ref_lat = geom[0]["lat"]
+    ref_lon = geom[0]["lon"]
+
+    def mx(lo):
+        return (lo - ref_lon) * 111320 * math.cos(math.radians(ref_lat))
+
+    def my(la):
+        return (la - ref_lat) * 110540
+
+    pts_m = [(mx(p["lon"]), my(p["lat"])) for p in geom]
+    seg_lens = [math.hypot(pts_m[i + 1][0] - pts_m[i][0], pts_m[i + 1][1] - pts_m[i][1]) for i in range(len(pts_m) - 1)]
+    cum = [0.0]
+    for L in seg_lens:
+        cum.append(cum[-1] + L)
+    total = cum[-1]
+    proj_pos = cum[seg_index] + t * seg_lens[seg_index]
+
+    def point_at(pos):
+        pos = max(0.0, min(total, pos))
+        for i, L in enumerate(seg_lens):
+            if cum[i] <= pos <= cum[i + 1] + 1e-9:
+                tt = 0.0 if L < 1e-9 else (pos - cum[i]) / L
+                return (pts_m[i][0] + tt * (pts_m[i + 1][0] - pts_m[i][0]),
+                        pts_m[i][1] + tt * (pts_m[i + 1][1] - pts_m[i][1]))
+        return pts_m[-1]
+
+    xa, ya = point_at(proj_pos - window_m)
+    xb, yb = point_at(proj_pos + window_m)
+    if math.hypot(xb - xa, yb - ya) < 1e-6:
+        # rue trop courte pour la fenetre demandee -- repli sur le segment brut
+        xa, ya = pts_m[seg_index]
+        xb, yb = pts_m[seg_index + 1]
+
+    def inv(x, y):
+        return (ref_lat + y / 110540, ref_lon + x / (111320 * math.cos(math.radians(ref_lat))))
+
+    lat_a, lon_a = inv(xa, ya)
+    lat_b, lon_b = inv(xb, yb)
+    return bearing_degrees(lat_a, lon_a, lat_b, lon_b) % 180
 
 
 def get_street_orientation(lat: float, lon: float) -> dict:
@@ -576,8 +672,8 @@ def get_street_orientation(lat: float, lon: float) -> dict:
         for i in range(len(geom) - 1):
             lat1, lon1 = geom[i]["lat"], geom[i]["lon"]
             lat2, lon2 = geom[i + 1]["lat"], geom[i + 1]["lon"]
-            n_lat, n_lon, dist, interior = _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2)
-            candidate = (dist, n_lat, n_lon, lat1, lon1, lat2, lon2)
+            n_lat, n_lon, dist, interior, t = _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2)
+            candidate = (dist, n_lat, n_lon, geom, i, t)
             if best_any is None or dist < best_any[0]:
                 best_any = candidate
             if interior and (best_interior is None or dist < best_interior[0]):
@@ -590,8 +686,8 @@ def get_street_orientation(lat: float, lon: float) -> dict:
     # de rue...).
     best = best_interior if best_interior is not None else best_any
 
-    dist, n_lat, n_lon, lat1, lon1, lat2, lon2 = best
-    road_bearing = bearing_degrees(lat1, lon1, lat2, lon2) % 180
+    dist, n_lat, n_lon, way_geom, seg_index, t = best
+    road_bearing = _bearing_smoothed_along_way(way_geom, seg_index, t)
 
     perp_a, perp_b = (road_bearing + 90) % 360, (road_bearing - 90) % 360
     bearing_to_property = bearing_degrees(n_lat, n_lon, lat, lon)
@@ -1586,7 +1682,14 @@ def run_pipeline(
             f"{parcelle['superficie']} m2")
 
 
-    update_project_marker(ogr2ogr_path, geo["lon"], geo["lat"], project_dir / "Projet.gpkg")
+    # Le marqueur affiche sur le plan doit correspondre au MEME point que
+    # celui utilise pour identifier la parcelle (cx, cy = centroide du toit),
+    # sinon l'etoile peut visuellement tomber sur une parcelle voisine de
+    # celle reellement retenue (ex: adresse geocodee sur AO 726 alors que la
+    # parcelle du toit, correctement identifiee, est AO 728) -- signale par
+    # Adrien sur le dossier Osny du 30/06/2026.
+    marker_lon, marker_lat = lambert93_inverse(cx, cy)
+    update_project_marker(ogr2ogr_path, marker_lon, marker_lat, project_dir / "Projet.gpkg")
     update_panel_dimensions(ogr2ogr_path, design, project_dir / "Cotes_panneaux.gpkg")
     update_panel_annotation(ogr2ogr_path, design, project_dir / "Annotation_panneaux.gpkg", dp_type, nb_panneaux, extents[PLAN_MASSE_SCALE])
 
