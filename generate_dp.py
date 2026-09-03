@@ -796,19 +796,22 @@ def update_streetview_photos(lat, lon, api_key, work_dir: Path):
 
 
 
-def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_length_m=8.0):
+def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_length_m=4.0):
     """
     Reporte le point ET les angles des prises de vue DP7 (paysage proche,
-    vue de face) et DP8 (paysage lointain, vues gauche/droite) sur les
-    couches "Vues" (lignes) / "Vues_Texte" (points, avec etiquette et une
-    icone oeil+angle de vue) -- meme pattern fiable a 2 couches que
-    l'annotation des panneaux (cf. update_panel_annotation). Ces 2 couches
-    sont deja cablees dans le template (modele_DP_v4.6.qgz) sur le plan de
-    situation (DP1, cadastrale + routiere -- visible uniquement au zoom le
-    plus serre, cf. visibilite par echelle sur la couche) ET le plan de
-    masse (DP2, avant + apres), conformement a l'exigence de l'art.
+    vue de face) et DP8 (paysage lointain, vues gauche/droite) sur la
+    couche "Vues_Texte" (points, avec etiquette et une icone oeil+angle de
+    vue qui porte deja visuellement la notion d'angle -- cf.
+    templates/dpc_view_icon.svg). Conforme a l'exigence de l'art.
     R. 431-10 d) du code de l'urbanisme (voir courrier d'incompletude Osny
     du 30/06/2026, points DPC1/DPC2).
+
+    Ne dessine PLUS de ligne de visee entre le point de prise de vue et
+    chaque icone (supprime a la demande d'Adrien : le "T" forme par ces 3
+    lignes convergentes etait visuellement redondant avec l'icone, qui
+    porte deja ses propres petites fleches). La couche "Vues" (lignes)
+    reste cablee dans le template mais reste vide -- aucune feature n'y
+    est plus ecrite.
 
     L'icone (templates/dpc_view_icon.svg, teinte "enerev teal") est
     referencee par chemin relatif depuis le style de "Vues_Texte" -- elle
@@ -818,7 +821,11 @@ def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_lengt
     relatif et affiche un symbole "manquant" a la place).
 
     Street View prend les 3 photos depuis un seul et meme point (seul le
-    cap/heading change) -- une fleche par vue, toutes partant de ce point.
+    cap/heading change). `arrow_length_m` (reduit a 4 m, contre 8 m
+    initialement) ne sert plus qu'a ecarter legerement les 3 icones les
+    unes des autres pour eviter qu'elles ne se chevauchent -- une valeur
+    plus faible limite aussi la derive visuelle si l'azimut de rue estime
+    est legerement imprecis pres d'une cassure (cf. get_street_orientation).
     """
     cam_lon, cam_lat = street_info["cam_lon"], street_info["cam_lat"]
     camx, camy = lambert93_forward(cam_lon, cam_lat)
@@ -839,11 +846,6 @@ def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_lengt
         if heading is None:
             continue
         tx, ty = tip(heading)
-        line_features.append({
-            "type": "Feature",
-            "geometry": {"type": "LineString", "coordinates": [[camx, camy], [tx, ty]]},
-            "properties": {},
-        })
         point_features.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [tx, ty]},
