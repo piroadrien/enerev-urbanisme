@@ -20,7 +20,7 @@ from pathlib import Path
 import streamlit as st
 
 from generate_dp import run_pipeline
-from cerfa_export import build_gnau_package
+from cerfa_export import build_gnau_package, stamp_bordereau_checkboxes
 
 st.set_page_config(page_title="Generateur de dossier DP", page_icon="📐")
 st.title("📐 Generateur de dossier DP")
@@ -53,7 +53,7 @@ if submitted:
             result = run_pipeline(
                 project_id=project_id.strip(),
                 dp_type=dp_type,
-                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.3.qgz"),
+                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.4.qgz"),
                 work_dir=str(work_dir),
                 # secrets : voir .streamlit/secrets.toml (Community Cloud : onglet "Secrets" de l'app)
                 username=st.secrets.get("opensolar_username"),
@@ -84,6 +84,10 @@ if submitted:
             pdf_error = None
             gnau_zip_bytes = None
             gnau_zip_name = None
+            # DP1 (obligatoire) et DP11 (notice, toujours generee) sont les
+            # seules pieces dont on est sur par defaut ; mises a jour ci-dessous
+            # si l'export QGIS des 6 PDF reussit (alors les 6 sont presentes).
+            pieces_present = {"DP1", "DP11"}
             try:
                 from pdf_export import export_dp_pdfs
                 pdf_dir = Path(tmp) / "pdfs"
@@ -96,17 +100,33 @@ if submitted:
                 # generate_dp.run_pipeline() / cerfa_export.py, pas par QGIS --
                 # on l'ajoute donc a cote des 6 PDF exportes du .qgz.
                 pieces = {**pdfs, "DP11": result.notice_dpc11}
-
-                gnau_zip_path = build_gnau_package(
-                    Path(tmp) / f"{project_dir.name}_gnau.zip",
-                    result.cerfa,
-                    pieces,
-                )
-                gnau_zip_name = f"{project_dir.name}_gnau.zip"
-                with open(gnau_zip_path, "rb") as f:
-                    gnau_zip_bytes = f.read()
+                pieces_present = set(pdfs.keys()) | {"DP11"}
             except Exception as exc:
                 pdf_error = str(exc)
+
+            # Coche sur le bordereau (page 13/14 du CERFA) les cases des pieces
+            # reellement presentes -- ces cases sont dessinees statiquement dans
+            # le PDF (pas des champs AcroForm), donc fill_cerfa() ne peut pas
+            # les cocher lui-meme. Fait sur le fichier avant assemblage du zip
+            # GNAU, pour que la version zippee ET la version telechargeable
+            # seule reflete toutes deux le bordereau a jour.
+            try:
+                stamp_bordereau_checkboxes(result.cerfa, pieces_present)
+            except Exception as exc:
+                log(f"  (bordereau non coche automatiquement, ignore : {exc})")
+
+            if pdf_error is None:
+                try:
+                    gnau_zip_path = build_gnau_package(
+                        Path(tmp) / f"{project_dir.name}_gnau.zip",
+                        result.cerfa,
+                        pieces,
+                    )
+                    gnau_zip_name = f"{project_dir.name}_gnau.zip"
+                    with open(gnau_zip_path, "rb") as f:
+                        gnau_zip_bytes = f.read()
+                except Exception as exc:
+                    pdf_error = str(exc)
 
             # CERFA + notice DPC11 (toujours disponibles, meme si l'export
             # QGIS headless a echoue -- ni l'un ni l'autre ne depend de

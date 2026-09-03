@@ -46,6 +46,7 @@ IMPORTANT (a valider avec Adrien) :
 
 from __future__ import annotations
 
+import io
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date
@@ -314,6 +315,99 @@ def generate_notice_dpc11(
                              leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm)
     doc.build(story)
     return output_path
+
+
+# ---------------------------------------------------------------------------
+# 1ter. Bordereau des pièces jointes (page 13/14 du CERFA) -- cases à cocher
+# ---------------------------------------------------------------------------
+#
+# Ces cases ("DPC1", "DPC2", ... "DPC11") ne sont PAS des champs AcroForm :
+# ce sont des cases dessinées statiquement dans le PDF (rectangle + coche),
+# donc fill_cerfa() (qui ne touche que l'AcroForm) ne peut pas les cocher.
+# On les coche donc en surimposant un petit graphique de coche directement
+# sur la page, au bon endroit -- pour CHAQUE piece reellement presente dans
+# le dossier GNAU (pas seulement DPC11), afin que le bordereau corresponde
+# toujours a la realite du dossier sans intervention manuelle.
+#
+# Coordonnees mesurees sur templates/cerfa_DPC_1_1.pdf (pdfplumber, systeme
+# "top" = distance depuis le haut de page). Chaque case fait environ 8x8 pt,
+# demarre 1.5 pt au-dessus du haut du texte du label correspondant, sur les
+# pages 13 (DPC1/DPC2) et 14 (DPC4/DPC6/DPC7/DPC8/DPC11) du gabarit CERFA
+# 16702*02 (376 champs) utilise par ENEREV.
+
+BORDEREAU_CHECKBOX_COORDS = {
+    # piece : (page_index_0based, x0, box_width, box_top, box_height)
+    "DP1": (12, 55.5239, 8.004, 568.47, 8.00),
+    "DP2": (12, 55.5239, 8.004, 690.47, 8.00),
+    "DP4": (13, 55.5239, 8.004, 32.84, 8.00),
+    "DP6": (13, 55.5239, 8.004, 201.13, 8.00),
+    "DP7": (13, 55.5239, 8.004, 241.63, 8.00),
+    "DP8": (13, 55.5239, 8.004, 270.14, 8.00),
+    "DP11": (13, 55.5239, 8.004, 541.75, 8.00),
+}
+
+
+def _draw_checkmark_overlay(canvas_obj, x0: float, box_w: float, top: float, box_h: float, page_h: float):
+    """Dessine une coche vectorielle (2 segments) dans la case [x0, x0+box_w] x
+    [top, top+box_h] (coordonnees 'top' -> converties en repere bas-gauche
+    pour reportlab). Pas de dependance a une image externe."""
+    pad = box_h * 0.22
+    x_left, x_mid, x_right = x0 + pad, x0 + box_w * 0.42, x0 + box_w - pad * 0.6
+    y_top_pdf = page_h - top  # haut de la case, repere bas-gauche
+    y_left = y_top_pdf - box_h * 0.55
+    y_mid = y_top_pdf - box_h * 0.78
+    y_right = y_top_pdf - box_h * 0.22
+
+    canvas_obj.setStrokeColorRGB(0.04, 0.04, 0.04)
+    canvas_obj.setLineWidth(1.3)
+    canvas_obj.setLineCap(1)  # round cap
+    canvas_obj.setLineJoin(1)
+    p = canvas_obj.beginPath()
+    p.moveTo(x_left, y_left)
+    p.lineTo(x_mid, y_mid)
+    p.lineTo(x_right, y_right)
+    canvas_obj.drawPath(p, stroke=1, fill=0)
+
+
+def stamp_bordereau_checkboxes(cerfa_path: Path, pieces_present) -> None:
+    """Coche, directement sur le PDF `cerfa_path` (deja rempli par
+    fill_cerfa), les cases du bordereau des pieces jointes correspondant aux
+    cles presentes dans `pieces_present` (parmi "DP1","DP2","DP4","DP6",
+    "DP7","DP8","DP11"). Modifie le fichier sur place. Les cles inconnues ou
+    sans coordonnees enregistrees sont ignorees silencieusement (mieux vaut
+    un bordereau partiellement coche qu'une exception qui bloque tout le
+    dossier)."""
+    from reportlab.pdfgen import canvas as _canvas
+
+    cerfa_path = Path(cerfa_path)
+    reader = PdfReader(str(cerfa_path))
+    page_h = float(reader.pages[0].mediabox.height)
+    page_w = float(reader.pages[0].mediabox.width)
+
+    by_page = {}
+    for key in pieces_present:
+        coords = BORDEREAU_CHECKBOX_COORDS.get(key)
+        if coords:
+            by_page.setdefault(coords[0], []).append(coords)
+
+    if not by_page:
+        return
+
+    writer = PdfWriter()
+    writer.append(reader)
+
+    for page_index, boxes in by_page.items():
+        buf = io.BytesIO()
+        c = _canvas.Canvas(buf, pagesize=(page_w, page_h))
+        for _, x0, box_w, top, box_h in boxes:
+            _draw_checkmark_overlay(c, x0, box_w, top, box_h, page_h)
+        c.save()
+        buf.seek(0)
+        overlay_page = PdfReader(buf).pages[0]
+        writer.pages[page_index].merge_page(overlay_page)
+
+    with open(cerfa_path, "wb") as f:
+        writer.write(f)
 
 
 # ---------------------------------------------------------------------------

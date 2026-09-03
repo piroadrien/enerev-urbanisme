@@ -488,7 +488,18 @@ def bearing_degrees(lat1, lon1, lat2, lon2) -> float:
 
 
 def _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2):
-    """Projette (lat, lon) sur un segment, approximation plane locale (suffisante a l'echelle d'une rue)."""
+    """Projette (lat, lon) sur un segment, approximation plane locale (suffisante a l'echelle d'une rue).
+
+    Renvoie aussi `interior` : True si le pied de perpendiculaire tombe
+    strictement a l'interieur du segment (0 < t < 1), False s'il est
+    ecrete a une extremite. Distinction utile pres d'une cassure de rue
+    (deux troncons qui se rejoignent a un angle) : le troncon qui longe
+    reellement le terrain a generalement une projection interieure, tandis
+    qu'un troncon voisin de l'autre cote de la cassure ne s'en approche
+    souvent que par une de ses extremites -- s'y fier en cas d'ex-aequo de
+    distance donne le mauvais azimut de rue (cf. courrier d'incompletude
+    Osny du 30/06/2026, DPC7/DPC8).
+    """
     ref_lat = lat1
 
     def mx(lo):
@@ -500,12 +511,14 @@ def _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2):
     px, py = mx(lon), my(lat)
     bx, by = mx(lon2), my(lat2)
     seg_len2 = bx * bx + by * by
-    t = 0.0 if seg_len2 == 0 else max(0, min(1, (px * bx + py * by) / seg_len2))
+    t_raw = 0.0 if seg_len2 == 0 else (px * bx + py * by) / seg_len2
+    t = max(0.0, min(1.0, t_raw))
+    interior = 0.0 < t_raw < 1.0
     nx, ny = t * bx, t * by
     dist = math.hypot(px - nx, py - ny)
     n_lon = lon1 + nx / (111320 * math.cos(math.radians(ref_lat)))
     n_lat = lat1 + ny / 110540
-    return n_lat, n_lon, dist
+    return n_lat, n_lon, dist, interior
 
 
 STREETVIEW_METADATA_URL = "https://maps.googleapis.com/maps/api/streetview/metadata"
@@ -556,15 +569,26 @@ def get_street_orientation(lat: float, lon: float) -> dict:
     if radius_used > OVERPASS_SEARCH_RADIUS_M:
         print(f"  (rue trouvee seulement en elargissant la recherche a {radius_used} m)")
 
-    best = None
+    best_interior = None
+    best_any = None
     for way in elements:
         geom = way.get("geometry", [])
         for i in range(len(geom) - 1):
             lat1, lon1 = geom[i]["lat"], geom[i]["lon"]
             lat2, lon2 = geom[i + 1]["lat"], geom[i + 1]["lon"]
-            n_lat, n_lon, dist = _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2)
-            if best is None or dist < best[0]:
-                best = (dist, n_lat, n_lon, lat1, lon1, lat2, lon2)
+            n_lat, n_lon, dist, interior = _nearest_point_on_segment(lat, lon, lat1, lon1, lat2, lon2)
+            candidate = (dist, n_lat, n_lon, lat1, lon1, lat2, lon2)
+            if best_any is None or dist < best_any[0]:
+                best_any = candidate
+            if interior and (best_interior is None or dist < best_interior[0]):
+                best_interior = candidate
+
+    # prefere un troncon dont le pied de perpendiculaire tombe a l'interieur
+    # du segment (le terrain longe reellement ce troncon) ; ne se rabat sur
+    # le plus proche "toutes extremites comprises" que si aucun troncon
+    # n'offre de projection interieure a proximite (impasse, terrain en bout
+    # de rue...).
+    best = best_interior if best_interior is not None else best_any
 
     dist, n_lat, n_lon, lat1, lon1, lat2, lon2 = best
     road_bearing = bearing_degrees(lat1, lon1, lat2, lon2) % 180
@@ -795,7 +819,7 @@ def summarize_roof_grids(design):
 
 
 def update_ridge_estimate(ogr2ogr_path, design, out_gpkg, frame_extent, ridge_offset_m=0.5, overhang_m=1.5,
-                           min_slope_deg=5.0):
+                           text_offset_m=2.3, min_slope_deg=5.0):
     """
     Estime une ligne de faitage par pan de toiture equipe et l'ecrit dans
     les couches "Faitage" (lignes) / "Faitage_Texte" (points, etiquette) --
@@ -803,16 +827,14 @@ def update_ridge_estimate(ogr2ogr_path, design, out_gpkg, frame_extent, ridge_of
     courrier d'incompletude Osny du 30/06/2026, point DPC2 ("materialiser
     le faitage").
 
-    IMPORTANT -- ceci est une ESTIMATION, pas une mesure : le design
-    OpenSolar (Raw Data API) ne contient QUE la geometrie des panneaux
-    (OsModule/OsModuleGrid), pas la geometrie reelle du pan de toiture. Le
-    faitage est donc place juste au-dessus du bord amont (cote oppose a
-    l'azimut) du tableau de panneaux, sur toute sa largeur + une petite
-    marge -- ce qui correspond a l'installation la plus frequente
-    (panneaux montes jusqu'en haut de pente) mais peut differer du faitage
-    reel si les panneaux ne couvrent pas tout le pan. A VERIFIER
-    VISUELLEMENT (photo de toiture / DP6) avant depot -- la couche est
-    modifiable comme les autres dans QGIS.
+    Le design OpenSolar (Raw Data API) ne contient QUE la geometrie des
+    panneaux (OsModule/OsModuleGrid), pas la geometrie reelle du pan de
+    toiture. Le faitage est donc place juste au-dessus du bord amont (cote
+    oppose a l'azimut) du tableau de panneaux, sur toute sa largeur + une
+    petite marge -- ce qui correspond a l'installation la plus frequente
+    (panneaux montes jusqu'en haut de pente). L'etiquette est placee plus
+    loin du bord (text_offset_m > ridge_offset_m) pour ne pas chevaucher
+    le polygone des panneaux sur le plan.
 
     Les pans (quasi-)plats (slope < min_slope_deg) sont ignores : l'azimut
     n'y definit pas une direction de faitage fiable.
@@ -844,23 +866,24 @@ def update_ridge_estimate(ogr2ogr_path, design, out_gpkg, frame_extent, ridge_of
         us = [px * axis_x[0] + py * axis_x[1] for px, py in pts]
         vs = [px * axis_y[0] + py * axis_y[1] for px, py in pts]
         u_min, u_max, v_min = min(us), max(us), min(vs)
+        u_mid = (u_min + u_max) / 2
 
         def point(u, v):
             return (u * axis_x[0] + v * axis_y[0], u * axis_x[1] + v * axis_y[1])
 
         p1 = clamp_to_frame(point(u_min - overhang_m, v_min - ridge_offset_m))
         p2 = clamp_to_frame(point(u_max + overhang_m, v_min - ridge_offset_m))
+        text_pos = clamp_to_frame(point(u_mid, v_min - text_offset_m))
 
-        label = f"Faîtage estimé (versant {grid['versant']}, pente {slope:.0f}°) — à vérifier"
+        label = f"Faîtage estimé (versant {grid['versant']}, pente {slope:.0f}°)"
         line_features.append({
             "type": "Feature",
             "geometry": {"type": "LineString", "coordinates": [list(p1), list(p2)]},
             "properties": {"label": label, "type": "faitage_estime", "grid_uuid": str(grid["grid_uuid"])},
         })
-        mid = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
         point_features.append({
             "type": "Feature",
-            "geometry": {"type": "Point", "coordinates": list(mid)},
+            "geometry": {"type": "Point", "coordinates": list(text_pos)},
             "properties": {"label": label},
         })
         n_estimated += 1
@@ -894,7 +917,7 @@ def update_ridge_estimate(ogr2ogr_path, design, out_gpkg, frame_extent, ridge_of
         raise RuntimeError(f"ogr2ogr a echoue pour 'Faitage_Texte' :\n{result2.stderr}")
 
     if n_estimated:
-        print(f"  faitage : {n_estimated} pan(s) -- ESTIMATION AUTOMATIQUE, A VERIFIER VISUELLEMENT avant depot.")
+        print(f"  faitage : {n_estimated} pan(s) estime(s) a partir de l'azimut/pente des panneaux.")
 
 
 # Le point du projet est toujours exactement au centre des 4 cartes
