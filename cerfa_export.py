@@ -15,13 +15,20 @@ exportes depuis GNAU (Fontenay-aux-Roses et Verneuil-sur-Seine) :
     DPC6_1_1.pdf        <- DP6  insertion dans l'environnement
     DPC7_1_1.pdf        <- DP7  photo environnement proche
     DPC8_1_1.pdf        <- DP8  photo paysage lointain
+    DPC11_1_1.pdf       <- DP11 notice materiaux / modalites d'execution
+                                (generee directement par ce module, PAS par
+                                QGIS -- cf. generate_notice_dpc11() ; ajoutee
+                                suite au courrier d'incompletude Osny du
+                                30/06/2026, cette piece etait absente avant)
 
     (ERREURS_1_1.html n'est qu'un rapport de validation genere PAR GNAU a
     l'export ; il n'est pas necessaire a l'import et n'est donc pas recree.)
 
-Ces 6 PDF de pieces sont exactement ceux que produit deja modele_DP_v4.2.qgz
-(un report QGIS independant par DP), donc aucun changement cote QGIS n'est
-necessaire : il suffit de les renommer/copier au bon endroit.
+Les 6 PDF de plans/photos sont exactement ceux que produit deja
+modele_DP_v4.3.qgz (un report QGIS independant par DP), donc aucun
+changement cote QGIS n'est necessaire pour ceux-la : il suffit de les
+renommer/copier au bon endroit. La notice DPC11 est generee separement
+(reportlab), car ce n'est pas un plan/rapport QGIS.
 
 IMPORTANT (a valider avec Adrien) :
     Le champ D3 ("Coordonnees du declarant" -> adresse) est ambigu dans les
@@ -114,6 +121,13 @@ class ProjectCerfaData:
     prefixe_cadastral: str = ""
     superficie_totale_m2: Optional[int] = None  # defaut = superficie_parcelle_m2
     date_signature: Optional[date] = None        # defaut = aujourd'hui
+    # liste de dicts {"nb_panneaux", "versant", "slope", ...} -- un par pan
+    # de toiture equipe (cf. generate_dp.summarize_roof_grids). Utilise pour
+    # detailler le(s) versant(s) dans la description CERFA (C2ZD1) --
+    # suite au courrier d'incompletude Osny du 30/06/2026, dont la
+    # description generique ("installation de N panneaux en
+    # surimposition") a ete jugee insuffisante.
+    roof_grids: Optional[list] = None
 
 
 def compute_oplstparcelle(prefixe: str, section: str, numero: str, superficie) -> str:
@@ -126,6 +140,31 @@ def compute_oplstparcelle(prefixe: str, section: str, numero: str, superficie) -
     return "¢" + "¢".join(parts) + "¢"
 
 
+def describe_versants(roof_grids: Optional[list]) -> str:
+    """Construit le segment de phrase decrivant le(s) versant(s) de toiture
+    equipe(s), a partir de generate_dp.summarize_roof_grids(). Vide si
+    l'information n'est pas disponible (ne bloque jamais la generation du
+    CERFA -- au pire, la description reste generique comme avant)."""
+    if not roof_grids:
+        return ""
+    parts = []
+    for g in roof_grids:
+        versant = g.get("versant")
+        slope = g.get("slope")
+        n = g.get("nb_panneaux")
+        if not versant or versant == "non determine":
+            continue
+        seg = f"versant {versant}"
+        if slope is not None:
+            seg += f" (pente {slope:.0f}°)"
+        if n:
+            seg += f" : {n} panneau(x)"
+        parts.append(seg)
+    if not parts:
+        return ""
+    return ", ".join(parts)
+
+
 def build_cerfa_field_values(data: ProjectCerfaData, declarant_adresse_terrain: bool = False) -> dict[str, str]:
     """Construit le dict complet des valeurs a ecrire dans le CERFA."""
     values = dict(CERFA_STATIC_DEFAULTS)
@@ -133,8 +172,14 @@ def build_cerfa_field_values(data: ProjectCerfaData, declarant_adresse_terrain: 
     superficie_totale = data.superficie_totale_m2 or data.superficie_parcelle_m2
     sig_date = data.date_signature or date.today()
 
+    versants_desc = describe_versants(data.roof_grids)
+    description = f"Installation de {data.nb_panneaux} panneaux photovoltaïques en surimposition sur toiture existante"
+    if versants_desc:
+        description += f", {versants_desc}"
+    description += "."
+
     values.update({
-        "C2ZD1_description": f"Installation de {data.nb_panneaux} panneaux en surimposition",
+        "C2ZD1_description": description,
         "C2ZP1_crete": str(round(data.puissance_crete_kwc)),
 
         "T2Q_numero": data.numero_voie,
@@ -163,6 +208,112 @@ def build_cerfa_field_values(data: ProjectCerfaData, declarant_adresse_terrain: 
         values["D3V_voie"] = data.nom_voie
 
     return values
+
+
+# ---------------------------------------------------------------------------
+# 1bis. Notice DPC11 (materiaux + modalites d'execution)
+# ---------------------------------------------------------------------------
+#
+# Piece jusqu'ici absente du dossier -- suite au courrier d'incompletude
+# Osny du 30/06/2026 : "notice faisant apparaitre les materiaux utilises et
+# les modalites d'execution des travaux [Art. R. 431-14, R. 431-14-1 et
+# R. 441-8-1 du code de l'urbanisme] ... indiquer sur quel versant de la
+# toiture les panneaux seront installes".
+#
+# Le texte des materiaux/modalites ci-dessous est une description standard
+# pour une pose ENEREV en surimposition -- A RELIRE/AJUSTER avec Adrien si
+# elle ne correspond pas exactement au procede reellement mis en oeuvre
+# (marque des rails, fixations, onduleur vs micro-onduleurs, etc.).
+
+NOTICE_MATERIAUX_TEXTE = (
+    "Les panneaux photovoltaïques sont installés en surimposition de la couverture existante, "
+    "sans modification de la charpente ni de la structure du bâtiment. Le procédé de pose repose "
+    "sur des rails de fixation en aluminium anodisé, fixés à la charpente au moyen de crochets ou "
+    "pattes de fixation traversant la couverture au droit des chevrons, avec reprise d'étanchéité "
+    "à chaque point de fixation. Les modules photovoltaïques sont ensuite clipsés sur les rails au "
+    "moyen de pinces (clamps) intermédiaires et d'extrémité, sans perçage des modules. "
+    "L'ensemble est raccordé à un ou plusieurs onduleurs/micro-onduleurs, installés en toiture ou en "
+    "sous-face, puis au tableau électrique existant."
+)
+
+NOTICE_MODALITES_TEXTE = (
+    "Les travaux consistent en la pose des rails et fixations, la mise en place des modules, le "
+    "câblage électrique (courant continu en toiture, courant alternatif jusqu'au tableau) et les "
+    "raccordements. Aucune reprise de couverture n'est nécessaire en dehors des points de fixation, "
+    "qui font l'objet d'une reprise d'étanchéité soignée (about, plaque de répartition ou solin selon "
+    "le type de couverture). Le chantier n'entraîne pas de modification de l'aspect extérieur du "
+    "bâtiment autre que l'ajout des modules eux-mêmes, posés dans le plan de la toiture."
+)
+
+
+def _format_versants_lines(roof_grids: Optional[list]) -> list[str]:
+    if not roof_grids:
+        return ["Versant(s) de toiture : à préciser (information non disponible automatiquement)."]
+    lines = []
+    for g in roof_grids:
+        versant = g.get("versant") or "non déterminé"
+        slope = g.get("slope")
+        n = g.get("nb_panneaux")
+        slope_txt = f", pente d'environ {slope:.0f}°" if slope is not None else ""
+        lines.append(f"Versant {versant}{slope_txt} : {n} panneau(x).")
+    return lines
+
+
+def generate_notice_dpc11(
+    output_path: Path,
+    nb_panneaux: int,
+    puissance_crete_kwc: float,
+    roof_grids: Optional[list] = None,
+    adresse_site: str = "",
+) -> Path:
+    """Genere la notice DPC11 (materiaux utilises + modalites d'execution
+    des travaux), piece PDF a part entiere du dossier GNAU.
+
+    Necessite 'reportlab' (cf. requirements.txt)."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_JUSTIFY
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    styles = getSampleStyleSheet()
+    title_style = styles["Heading1"]
+    h2_style = styles["Heading2"]
+    body_style = ParagraphStyle("body", parent=styles["BodyText"], alignment=TA_JUSTIFY, spaceAfter=8)
+
+    story = [
+        Paragraph("DPC11 — Notice descriptive des matériaux et modalités d'exécution", title_style),
+        Spacer(1, 0.3 * cm),
+    ]
+    if adresse_site:
+        story.append(Paragraph(f"Projet : installation photovoltaïque — {adresse_site}", body_style))
+    story.append(Paragraph(
+        f"Puissance crête installée : {puissance_crete_kwc:.1f} kWc — {nb_panneaux} panneau(x) photovoltaïque(s).",
+        body_style,
+    ))
+    story.append(Spacer(1, 0.4 * cm))
+
+    story.append(Paragraph("1. Matériaux utilisés", h2_style))
+    story.append(Paragraph(NOTICE_MATERIAUX_TEXTE, body_style))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("2. Modalités d'exécution des travaux", h2_style))
+    story.append(Paragraph(NOTICE_MODALITES_TEXTE, body_style))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("3. Versant(s) de toiture équipé(s)", h2_style))
+    story.append(ListFlowable(
+        [ListItem(Paragraph(line, body_style)) for line in _format_versants_lines(roof_grids)],
+        bulletType="bullet",
+    ))
+
+    doc = SimpleDocTemplate(str(output_path), pagesize=A4,
+                             leftMargin=2 * cm, rightMargin=2 * cm, topMargin=2 * cm, bottomMargin=2 * cm)
+    doc.build(story)
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +358,7 @@ GNAU_PIECE_FILENAMES = {
     "DP6": "DPC6_1_1.pdf",   # insertion environnement
     "DP7": "DPC7_1_1.pdf",   # photo proche
     "DP8": "DPC8_1_1.pdf",   # photo lointain
+    "DP11": "DPC11_1_1.pdf",  # notice materiaux / modalites d'execution
 }
 CERFA_FILENAME = "cerfa_DPC_1_1.pdf"
 

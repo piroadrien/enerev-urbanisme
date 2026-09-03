@@ -581,6 +581,11 @@ def get_street_orientation(lat: float, lon: float) -> dict:
     return {
         "road_bearing": road_bearing, "heading_property": heading_property,
         "distance_to_road_m": dist, "source": "osm",
+        # point de prise de vue (sur la rue, projete au plus pres du terrain) --
+        # utilise pour reporter le point ET les angles des prises de vue DPC7/DPC8
+        # sur le plan de situation (DP1) et le plan de masse (DP2), conformement
+        # a l'article R. 431-10 d) du code de l'urbanisme.
+        "cam_lat": n_lat, "cam_lon": n_lon,
     }
 
 
@@ -606,7 +611,11 @@ def get_heading_fallback_from_panorama(lat: float, lon: float, api_key: str) -> 
         if last_status == "OK":
             pano_lat, pano_lon = data["location"]["lat"], data["location"]["lng"]
             heading_property = bearing_degrees(pano_lat, pano_lon, lat, lon)
-            return {"road_bearing": None, "heading_property": heading_property, "distance_to_road_m": None, "source": "pano"}
+            return {
+                "road_bearing": None, "heading_property": heading_property,
+                "distance_to_road_m": None, "source": "pano",
+                "cam_lat": pano_lat, "cam_lon": pano_lon,
+            }
 
     raise RuntimeError(f"Aucune couverture Street View trouvee, meme jusqu'a 1000 m (status={last_status}).")
 
@@ -656,6 +665,236 @@ def update_streetview_photos(lat, lon, api_key, work_dir: Path):
     source_label = "OSM (rue reelle)" if street["source"] == "osm" else "repli point de vue (Overpass indisponible)"
     print(f"  [{source_label}] azimuts : face={heading_property:.0f}° gauche={heading_left:.0f}° droite={heading_right:.0f}°")
 
+    # renvoye pour permettre a l'appelant de reporter le point ET les angles
+    # de prise de vue sur le plan de situation (DP1) et le plan de masse (DP2)
+    # -- cf. update_viewpoint_annotation() -- exige par l'art. R. 431-10 d).
+    return {
+        "cam_lat": street["cam_lat"], "cam_lon": street["cam_lon"],
+        "heading_property": heading_property, "heading_left": heading_left, "heading_right": heading_right,
+        "source": street["source"],
+    }
+
+
+
+def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_length_m=8.0):
+    """
+    Reporte le point ET les angles des prises de vue DPC7 (paysage proche,
+    vue de face) et DPC8 (paysage lointain, vues gauche/droite) sur les
+    couches "Vues" (lignes, sans etiquette) / "Vues_Texte" (points, avec
+    etiquette) -- meme pattern fiable a 2 couches que l'annotation des
+    panneaux (cf. update_panel_annotation). Ces 2 couches sont deja
+    cablees dans le template (modele_DP_v4.3.qgz) sur le plan de situation
+    (DP1, cadastrale + routiere) ET le plan de masse (DP2, avant + apres),
+    conformement a l'exigence de l'art. R. 431-10 d) du code de
+    l'urbanisme (voir courrier d'incompletude Osny du 30/06/2026, points
+    DPC1/DPC2).
+
+    Street View prend les 3 photos depuis un seul et meme point (seul le
+    cap/heading change) -- une fleche par vue, toutes partant de ce point.
+    """
+    cam_lon, cam_lat = street_info["cam_lon"], street_info["cam_lat"]
+    camx, camy = lambert93_forward(cam_lon, cam_lat)
+
+    def tip(heading_deg):
+        rad = math.radians(heading_deg)
+        dx, dy = math.sin(rad), math.cos(rad)  # cap compas (0=Nord) -> vecteur (est, nord)
+        return (camx + dx * arrow_length_m, camy + dy * arrow_length_m)
+
+    views = [
+        ("DPC7", street_info["heading_property"]),
+        ("DPC8 (gauche)", street_info["heading_left"]),
+        ("DPC8 (droite)", street_info["heading_right"]),
+    ]
+
+    line_features, point_features = [], []
+    for label, heading in views:
+        if heading is None:
+            continue
+        tx, ty = tip(heading)
+        line_features.append({
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [[camx, camy], [tx, ty]]},
+            "properties": {},
+        })
+        point_features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [tx, ty]},
+            "properties": {"label": label},
+        })
+    point_features.append({
+        "type": "Feature",
+        "geometry": {"type": "Point", "coordinates": [camx, camy]},
+        "properties": {"label": "Point de prise de vue (DPC7/DPC8)"},
+    })
+
+    line_geojson = {"type": "FeatureCollection", "features": line_features}
+    tmp_line = out_gpkg.parent / "_tmp_vues_ligne.geojson"
+    tmp_line.write_text(json.dumps(line_geojson), encoding="utf-8")
+
+    point_geojson = {"type": "FeatureCollection", "features": point_features}
+    tmp_point = out_gpkg.parent / "_tmp_vues_texte.geojson"
+    tmp_point.write_text(json.dumps(point_geojson), encoding="utf-8")
+
+    if out_gpkg.exists():
+        out_gpkg.unlink()
+
+    cmd1 = [ogr2ogr_path, "-f", "GPKG", str(out_gpkg), str(tmp_line),
+            "-nln", "Vues", "-nlt", "LINESTRING", "-a_srs", "EPSG:2154"]
+    result1 = subprocess.run(cmd1, capture_output=True, text=True)
+    tmp_line.unlink(missing_ok=True)
+    if result1.returncode != 0:
+        raise RuntimeError(f"ogr2ogr a echoue pour 'Vues' :\n{result1.stderr}")
+
+    cmd2 = [ogr2ogr_path, "-update", "-f", "GPKG", str(out_gpkg), str(tmp_point),
+            "-nln", "Vues_Texte", "-nlt", "POINT", "-a_srs", "EPSG:2154"]
+    result2 = subprocess.run(cmd2, capture_output=True, text=True)
+    tmp_point.unlink(missing_ok=True)
+    if result2.returncode != 0:
+        raise RuntimeError(f"ogr2ogr a echoue pour 'Vues_Texte' :\n{result2.stderr}")
+
+    print(f"  points de vue DPC7/DPC8 reportes (plan de situation + plan de masse)")
+
+
+CARDINAL_LABELS = [
+    "Nord", "Nord-Est", "Est", "Sud-Est", "Sud", "Sud-Ouest", "Ouest", "Nord-Ouest",
+]
+
+
+def azimuth_to_cardinal(azimuth_deg) -> str:
+    """Convertit un azimut (cap compas, 0=Nord) en point cardinal francais
+    (8 directions) -- utilise pour identifier le versant de toiture dans le
+    CERFA et la notice DPC11."""
+    if azimuth_deg is None:
+        return "non determine"
+    idx = int(((azimuth_deg % 360) + 22.5) // 45) % 8
+    return CARDINAL_LABELS[idx]
+
+
+def summarize_roof_grids(design):
+    """
+    Regroupe les panneaux par tableau/pan de toiture (grid_uuid), pour
+    identifier les differents versants de toiture equipes -- necessaire au
+    CERFA (description des travaux) et a la notice DPC11 (materiaux et
+    modalites d'execution -- indiquer sur quel versant les panneaux sont
+    installes, cf. courrier d'incompletude Osny du 30/06/2026).
+    """
+    panels = find_panels(design["object"])
+    groups = {}
+    for p in panels:
+        key = p.get("grid_uuid") or p["panel_uuid"]
+        g = groups.setdefault(key, {"azimuth": p["azimuth"], "slope": p["slope"], "panels": []})
+        g["panels"].append(p)
+    result = []
+    for key, g in groups.items():
+        result.append({
+            "grid_uuid": key, "azimuth": g["azimuth"], "slope": g["slope"],
+            "nb_panneaux": len(g["panels"]), "panels": g["panels"],
+            "versant": azimuth_to_cardinal(g["azimuth"]),
+        })
+    return result
+
+
+def update_ridge_estimate(ogr2ogr_path, design, out_gpkg, frame_extent, ridge_offset_m=0.5, overhang_m=1.5,
+                           min_slope_deg=5.0):
+    """
+    Estime une ligne de faitage par pan de toiture equipe et l'ecrit dans
+    les couches "Faitage" (lignes) / "Faitage_Texte" (points, etiquette) --
+    reportees uniquement sur le plan de masse (DP2 avant/apres), cf.
+    courrier d'incompletude Osny du 30/06/2026, point DPC2 ("materialiser
+    le faitage").
+
+    IMPORTANT -- ceci est une ESTIMATION, pas une mesure : le design
+    OpenSolar (Raw Data API) ne contient QUE la geometrie des panneaux
+    (OsModule/OsModuleGrid), pas la geometrie reelle du pan de toiture. Le
+    faitage est donc place juste au-dessus du bord amont (cote oppose a
+    l'azimut) du tableau de panneaux, sur toute sa largeur + une petite
+    marge -- ce qui correspond a l'installation la plus frequente
+    (panneaux montes jusqu'en haut de pente) mais peut differer du faitage
+    reel si les panneaux ne couvrent pas tout le pan. A VERIFIER
+    VISUELLEMENT (photo de toiture / DP6) avant depot -- la couche est
+    modifiable comme les autres dans QGIS.
+
+    Les pans (quasi-)plats (slope < min_slope_deg) sont ignores : l'azimut
+    n'y definit pas une direction de faitage fiable.
+    """
+    origin_lon, origin_lat = design["object"]["userData"]["sceneOrigin4326"]
+    x0, y0 = lambert93_forward(origin_lon, origin_lat)
+
+    fxmin, fymin, fxmax, fymax = frame_extent
+    fcx, fcy = (fxmin + fxmax) / 2, (fymin + fymax) / 2
+    half_w, half_h = (fxmax - fxmin) / 2 * 0.98, (fymax - fymin) / 2 * 0.98
+
+    def clamp_to_frame(pt):
+        x, y = pt
+        return (max(fcx - half_w, min(fcx + half_w, x)), max(fcy - half_h, min(fcy + half_h, y)))
+
+    line_features, point_features = [], []
+    n_estimated = 0
+
+    for grid in summarize_roof_grids(design):
+        azimuth, slope = grid["azimuth"], grid["slope"]
+        if azimuth is None or slope is None or slope < min_slope_deg:
+            continue
+
+        az_rad = math.radians(azimuth)
+        axis_y = (math.sin(az_rad), math.cos(az_rad))     # direction de l'azimut (aval, vers le bas de pente)
+        axis_x = (axis_y[1], -axis_y[0])                    # perpendiculaire (le long du faitage)
+
+        pts = [(x0 + cx, y0 + cy) for pnl in grid["panels"] for cx, cy in pnl["corners_local"]]
+        us = [px * axis_x[0] + py * axis_x[1] for px, py in pts]
+        vs = [px * axis_y[0] + py * axis_y[1] for px, py in pts]
+        u_min, u_max, v_min = min(us), max(us), min(vs)
+
+        def point(u, v):
+            return (u * axis_x[0] + v * axis_y[0], u * axis_x[1] + v * axis_y[1])
+
+        p1 = clamp_to_frame(point(u_min - overhang_m, v_min - ridge_offset_m))
+        p2 = clamp_to_frame(point(u_max + overhang_m, v_min - ridge_offset_m))
+
+        label = f"Faîtage estimé (versant {grid['versant']}, pente {slope:.0f}°) — à vérifier"
+        line_features.append({
+            "type": "Feature",
+            "geometry": {"type": "LineString", "coordinates": [list(p1), list(p2)]},
+            "properties": {"label": label, "type": "faitage_estime", "grid_uuid": str(grid["grid_uuid"])},
+        })
+        mid = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+        point_features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": list(mid)},
+            "properties": {"label": label},
+        })
+        n_estimated += 1
+
+    if n_estimated == 0:
+        print("  faitage : aucun pan incline (>= 5°) detecte -- couche Faitage laissee vide.")
+
+    line_geojson = {"type": "FeatureCollection", "features": line_features}
+    tmp_line = out_gpkg.parent / "_tmp_faitage_ligne.geojson"
+    tmp_line.write_text(json.dumps(line_geojson), encoding="utf-8")
+
+    point_geojson = {"type": "FeatureCollection", "features": point_features}
+    tmp_point = out_gpkg.parent / "_tmp_faitage_texte.geojson"
+    tmp_point.write_text(json.dumps(point_geojson), encoding="utf-8")
+
+    if out_gpkg.exists():
+        out_gpkg.unlink()
+
+    cmd1 = [ogr2ogr_path, "-f", "GPKG", str(out_gpkg), str(tmp_line),
+            "-nln", "Faitage", "-nlt", "LINESTRING", "-a_srs", "EPSG:2154"]
+    result1 = subprocess.run(cmd1, capture_output=True, text=True)
+    tmp_line.unlink(missing_ok=True)
+    if result1.returncode != 0:
+        raise RuntimeError(f"ogr2ogr a echoue pour 'Faitage' :\n{result1.stderr}")
+
+    cmd2 = [ogr2ogr_path, "-update", "-f", "GPKG", str(out_gpkg), str(tmp_point),
+            "-nln", "Faitage_Texte", "-nlt", "POINT", "-a_srs", "EPSG:2154"]
+    result2 = subprocess.run(cmd2, capture_output=True, text=True)
+    tmp_point.unlink(missing_ok=True)
+    if result2.returncode != 0:
+        raise RuntimeError(f"ogr2ogr a echoue pour 'Faitage_Texte' :\n{result2.stderr}")
+
+    if n_estimated:
+        print(f"  faitage : {n_estimated} pan(s) -- ESTIMATION AUTOMATIQUE, A VERIFIER VISUELLEMENT avant depot.")
 
 
 # Le point du projet est toujours exactement au centre des 4 cartes
@@ -1221,6 +1460,7 @@ def build_project_qgz(template_qgz: Path, out_qgz: Path, dp_variables: dict, ext
 class PipelineResult:
     qgz: Path            # projet QGIS + fichiers de donnees associes (project_dir)
     cerfa: Path           # CERFA rempli (cerfa_DPC_1_1.pdf), pret pour build_gnau_package()
+    notice_dpc11: Path    # notice materiaux/execution (DPC11_notice.pdf), pret pour build_gnau_package()
     project_dir: Path
 
 
@@ -1327,18 +1567,38 @@ def run_pipeline(
     update_panel_dimensions(ogr2ogr_path, design, project_dir / "Cotes_panneaux.gpkg")
     update_panel_annotation(ogr2ogr_path, design, project_dir / "Annotation_panneaux.gpkg", dp_type, nb_panneaux, extents[PLAN_MASSE_SCALE])
 
+    # faitage estime (plan de masse) -- suite au courrier d'incompletude Osny
+    # du 30/06/2026 (DPC2 : "materialiser le faitage"). ESTIMATION
+    # AUTOMATIQUE a partir de l'azimut/pente des panneaux (le design
+    # OpenSolar ne contient pas la geometrie reelle du pan de toiture) --
+    # a verifier visuellement avant depot.
+    try:
+        update_ridge_estimate(ogr2ogr_path, design, project_dir / "Faitage.gpkg", extents[PLAN_MASSE_SCALE])
+    except Exception as exc:
+        log(f"  ATTENTION : estimation du faitage echouee, ignoree ({exc})")
+        log("  -> le faitage reste a tracer manuellement dans QGIS pour ce projet.")
+
     try:
         update_system_image(session, org_id, project_id, token, system_obj.get("uuid"), project_dir / "Rendu_systeme.jpg", rotation_deg=rotation_deg)
     except Exception as exc:
         log(f"  ATTENTION : image du systeme non recuperee, ignoree ({exc})")
 
-    log("[7/8] Photos Street View (DP7/DP8)...")
+    log("[7/8] Photos Street View (DP7/DP8) + points de vue (DP1/DP2)...")
+    vues_gpkg = project_dir / "Vues_prises.gpkg"
     if google_api_key:
         try:
-            update_streetview_photos(geo["lat"], geo["lon"], google_api_key, project_dir)
+            street_info = update_streetview_photos(geo["lat"], geo["lon"], google_api_key, project_dir)
+            # points ET angles des prises de vue reportes sur le plan de
+            # situation et le plan de masse -- suite au courrier
+            # d'incompletude Osny du 30/06/2026 (DPC1/DPC2, art. R. 431-10 d)).
+            update_viewpoint_annotation(ogr2ogr_path, street_info, vues_gpkg)
         except Exception as exc:
             log(f"  ATTENTION : etape Street View echouee, ignoree ({exc})")
-            log("  -> DP7/DP8 restent a completer manuellement pour ce projet (aucune photo generee).")
+            log("  -> DP7/DP8 et les points de vue restent a completer manuellement pour ce projet.")
+            # ancien Vues_prises.gpkg d'un autre projet : on le supprime plutot
+            # que de le laisser en place (meme principe que pour les photos).
+            if vues_gpkg.exists():
+                vues_gpkg.unlink()
     else:
         log("  ignore (pas de google_api_key fourni)")
 
@@ -1355,7 +1615,12 @@ def run_pipeline(
     out_qgz = Path(out) if out else project_dir / f"{safe_name}.qgz"
     build_project_qgz(Path(template), out_qgz, dp_variables, extents, toiture_view)
 
-    from cerfa_export import ProjectCerfaData, build_cerfa_field_values, fill_cerfa
+    # versants de toiture equipes (azimut/pente par tableau) -- necessaire a
+    # la description CERFA ET a la notice DPC11 (materiaux/execution), cf.
+    # courrier d'incompletude Osny du 30/06/2026.
+    roof_grids = summarize_roof_grids(design)
+
+    from cerfa_export import ProjectCerfaData, build_cerfa_field_values, fill_cerfa, generate_notice_dpc11
     cerfa_data = ProjectCerfaData(
         nb_panneaux=nb_panneaux,
         puissance_crete_kwc=float(kwc) if kwc is not None else 0.0,
@@ -1367,14 +1632,26 @@ def run_pipeline(
         numero_cadastral=parcelle["numero"],
         superficie_parcelle_m2=parcelle["superficie"],
         prefixe_cadastral=parcelle["prefixe"],
+        roof_grids=roof_grids,
     )
     cerfa_values = build_cerfa_field_values(cerfa_data)
     cerfa_template = Path(template).parent / "cerfa_DPC_1_1.pdf"
     cerfa_pdf = project_dir / "cerfa_DPC_1_1.pdf"
     fill_cerfa(cerfa_template, cerfa_pdf, cerfa_values)
 
+    # DPC11 -- notice materiaux + modalites d'execution (versant de toiture
+    # inclus) : piece jusqu'ici absente du dossier -- suite au courrier
+    # d'incompletude Osny du 30/06/2026 (art. R. 431-14, R. 431-14-1 et
+    # R. 441-8-1 du code de l'urbanisme).
+    notice_pdf = project_dir / "DPC11_notice.pdf"
+    generate_notice_dpc11(
+        notice_pdf, nb_panneaux=nb_panneaux,
+        puissance_crete_kwc=float(kwc) if kwc is not None else 0.0,
+        roof_grids=roof_grids, adresse_site=client["adresse_site"],
+    )
+
     log(f"\nOK : {out_qgz}")
-    return PipelineResult(qgz=out_qgz, cerfa=cerfa_pdf, project_dir=project_dir)
+    return PipelineResult(qgz=out_qgz, cerfa=cerfa_pdf, notice_dpc11=notice_pdf, project_dir=project_dir)
 
 
 def main():

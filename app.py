@@ -53,7 +53,7 @@ if submitted:
             result = run_pipeline(
                 project_id=project_id.strip(),
                 dp_type=dp_type,
-                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.2.qgz"),
+                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.3.qgz"),
                 work_dir=str(work_dir),
                 # secrets : voir .streamlit/secrets.toml (Community Cloud : onglet "Secrets" de l'app)
                 username=st.secrets.get("opensolar_username"),
@@ -92,10 +92,15 @@ if submitted:
                     with open(pdf_path, "rb") as f:
                         pdf_bytes[label] = f.read()
 
+                # DPC11 (notice materiaux/execution) : generee directement par
+                # generate_dp.run_pipeline() / cerfa_export.py, pas par QGIS --
+                # on l'ajoute donc a cote des 6 PDF exportes du .qgz.
+                pieces = {**pdfs, "DP11": result.notice_dpc11}
+
                 gnau_zip_path = build_gnau_package(
                     Path(tmp) / f"{project_dir.name}_gnau.zip",
                     result.cerfa,
-                    pdfs,
+                    pieces,
                 )
                 gnau_zip_name = f"{project_dir.name}_gnau.zip"
                 with open(gnau_zip_path, "rb") as f:
@@ -103,10 +108,13 @@ if submitted:
             except Exception as exc:
                 pdf_error = str(exc)
 
-            # CERFA seul (toujours disponible, meme si l'export QGIS headless
-            # a echoue -- il ne depend pas de pdf_export.py).
+            # CERFA + notice DPC11 (toujours disponibles, meme si l'export
+            # QGIS headless a echoue -- ni l'un ni l'autre ne depend de
+            # pdf_export.py : le CERFA vient de pypdf, la notice de reportlab).
             with open(result.cerfa, "rb") as f:
                 cerfa_bytes = f.read()
+            with open(result.notice_dpc11, "rb") as f:
+                notice_bytes = f.read()
 
             # On garde tout en memoire (bytes) dans session_state -- le
             # dossier temporaire (tmp) est detruit a la sortie du 'with',
@@ -116,6 +124,7 @@ if submitted:
                 "zip_name": f"{project_dir.name}.zip",
                 "zip_bytes": zip_bytes,
                 "cerfa_bytes": cerfa_bytes,
+                "notice_bytes": notice_bytes,
                 "pdf_bytes": pdf_bytes,
                 "pdf_error": pdf_error,
                 "gnau_zip_name": gnau_zip_name,
@@ -162,24 +171,34 @@ if result:
             )
             st.caption(
                 "Contient cerfa_DPC_1_1.pdf, DPC1_1_1.pdf, DPC2_1_1.pdf, DPC4_1_1.pdf, "
-                "DPC6_1_1.pdf, DPC7_1_1.pdf et DPC8_1_1.pdf -- a deposer tel quel via "
-                "\"Importer le dossier\" > \"Import du formulaire et des pieces\" sur GNAU."
+                "DPC6_1_1.pdf, DPC7_1_1.pdf, DPC8_1_1.pdf et DPC11_1_1.pdf (notice materiaux/execution) "
+                "-- a deposer tel quel via \"Importer le dossier\" > \"Import du formulaire et des pieces\" sur GNAU."
             )
         else:
             st.warning(
-                "Export des 6 PDF (DP1/2/4/6/7/8) indisponible pour l'instant"
+                "Export des 6 PDF QGIS (DP1/2/4/6/7/8) indisponible pour l'instant"
                 + (f" : {result['pdf_error']}" if result["pdf_error"] else "")
-                + " -- le CERFA seul reste telechargeable ci-dessous."
+                + " -- le CERFA et la notice DPC11 restent telechargeables ci-dessous (ils ne dependent pas de QGIS)."
             )
-            st.download_button(
-                "⬇️ Telecharger le CERFA seul (cerfa_DPC_1_1.pdf)",
-                data=result["cerfa_bytes"],
-                file_name="cerfa_DPC_1_1.pdf",
-                mime="application/pdf",
-                key="dl_cerfa_only",
-            )
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "⬇️ CERFA seul (cerfa_DPC_1_1.pdf)",
+                    data=result["cerfa_bytes"],
+                    file_name="cerfa_DPC_1_1.pdf",
+                    mime="application/pdf",
+                    key="dl_cerfa_only",
+                )
+            with col2:
+                st.download_button(
+                    "⬇️ Notice DPC11 (materiaux/execution)",
+                    data=result["notice_bytes"],
+                    file_name="DPC11_1_1.pdf",
+                    mime="application/pdf",
+                    key="dl_notice_only",
+                )
             st.caption(
                 "En attendant que l'export QGIS headless (pdf_export.py) soit valide : "
                 "exporte DP1/DP2/DP4/DP6/DP7/DP8 manuellement depuis le .qgz, puis "
-                "zippe-les avec ce CERFA sous les noms DPC1_1_1.pdf ... DPC8_1_1.pdf."
+                "zippe-les avec ce CERFA et cette notice sous les noms DPC1_1_1.pdf ... DPC8_1_1.pdf et DPC11_1_1.pdf."
             )
