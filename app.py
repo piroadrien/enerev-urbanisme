@@ -53,7 +53,7 @@ if submitted:
             result = run_pipeline(
                 project_id=project_id.strip(),
                 dp_type=dp_type,
-                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.6.qgz"),
+                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.7.qgz"),
                 work_dir=str(work_dir),
                 # secrets : voir .streamlit/secrets.toml (Community Cloud : onglet "Secrets" de l'app)
                 username=st.secrets.get("opensolar_username"),
