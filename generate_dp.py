@@ -832,9 +832,11 @@ def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_lengt
     data-defined sur le style de "Vues_Texte", expression
     `360 - "heading"` : QGIS fait pivoter les symboles dans le sens
     ANTI-horaire pour un angle positif, l'oppose du cap compas qui
-    augmente dans le sens horaire -- d'ou l'inversion). Corrige le fait
-    que DP8 gauche/droite s'affichaient jusqu'ici avec la MEME orientation
-    fixe que DP7 (signale par Adrien).
+    augmente dans le sens horaire -- d'ou l'inversion).
+
+    Ne genere plus le point/etiquette "Point de prise de vue (DPC7/DPC8)"
+    (retire a la demande d'Adrien : redondant avec les 3 icones DP7/DP8
+    gauche/DP8 droite, qui portent deja l'information utile).
     """
     cam_lon, cam_lat = street_info["cam_lon"], street_info["cam_lat"]
     camx, camy = lambert93_forward(cam_lon, cam_lat)
@@ -860,11 +862,6 @@ def update_viewpoint_annotation(ogr2ogr_path, street_info, out_gpkg, arrow_lengt
             "geometry": {"type": "Point", "coordinates": [tx, ty]},
             "properties": {"label": label, "heading": round(heading, 1)},
         })
-    point_features.append({
-        "type": "Feature",
-        "geometry": {"type": "Point", "coordinates": [camx, camy]},
-        "properties": {"label": "Point de prise de vue (DPC7/DPC8)", "heading": 0},
-    })
 
     line_geojson = {"type": "FeatureCollection", "features": line_features}
     tmp_line = out_gpkg.parent / "_tmp_vues_ligne.geojson"
