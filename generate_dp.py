@@ -511,6 +511,20 @@ def update_panels(ogr2ogr_path, design, out_gpkg):
 # ═════════════════════════════════════════════════════════════
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Miroirs Overpass publics, essayes dans l'ordre si le principal echoue --
+# decouvert le 06/09/2026 (log Streamlit Cloud) : overpass-api.de peut
+# refuser la connexion TCP (ConnectionError, pas un simple code HTTP 5xx/429)
+# depuis certains environnements d'hebergement, ce qui faisait basculer
+# silencieusement TOUS les dossiers sur le repli "position Street View brute"
+# (get_heading_fallback_from_panorama) -- lequel ne calcule PAS de
+# perpendiculaire a la rue, contrairement a get_street_orientation. C'est la
+# cause reelle du defaut d'alignement DP7/DP8 signale par Adrien : le code
+# de calcul perpendiculaire n'etait tout simplement jamais execute.
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
 STREETVIEW_IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
 STREETVIEW_SIZE = "1024x768"
 STREETVIEW_FOV = 90
@@ -625,41 +639,64 @@ def get_street_orientation(lat: float, lon: float) -> dict:
     Trouve le troncon de rue OpenStreetMap le plus proche et calcule :
       - heading_property : azimut perpendiculaire a la rue, vers la propriete (DP7)
     Elargit progressivement le rayon de recherche si rien n'est trouve.
-    Leve RuntimeError si Overpass est indisponible (429/5xx persistant) --
-    le code appelant doit prevoir un repli (cf. get_heading_fallback_from_panorama).
+    Essaie plusieurs miroirs Overpass (OVERPASS_MIRRORS) : le principal
+    (overpass-api.de) peut refuser la connexion TCP depuis certains
+    environnements d'hebergement (constate en production le 06/09/2026),
+    ce qui basculait silencieusement sur le repli photo brute -- lequel ne
+    calcule pas de perpendiculaire a la rue (cf. get_heading_fallback_from_panorama).
+    Leve RuntimeError seulement si TOUS les miroirs echouent -- le code
+    appelant doit alors prevoir un repli.
     """
     elements = []
     radius_used = None
+    last_error = None
+
     for radius in (OVERPASS_SEARCH_RADIUS_M, 100, 200):
         query = f"[out:json][timeout:15];way(around:{radius},{lat},{lon})[highway];out geom;"
-        r = None
-        for attempt in range(3):
-            r = requests.post(
-                OVERPASS_URL, data={"data": query},
-                headers={"User-Agent": "enerev-dp-tool/1.0 (contact: adrien.piro@enerev.fr)"},
-                timeout=20,
-            )
-            if r.status_code == 200:
-                break
-            if r.status_code == 429:
-                # respecter Retry-After si fourni, sinon attendre plus longtemps
-                # qu'une simple erreur serveur (429 = on nous demande explicitement
-                # de ralentir, pas juste une panne transitoire)
-                wait = int(r.headers.get("Retry-After", 20 * (attempt + 1)))
-                if attempt < 2:
-                    time.sleep(wait)
+        got_response = False
+        for mirror in OVERPASS_MIRRORS:
+            r = None
+            for attempt in range(3):
+                try:
+                    r = requests.post(
+                        mirror, data={"data": query},
+                        headers={"User-Agent": "enerev-dp-tool/1.0 (contact: adrien.piro@enerev.fr)"},
+                        timeout=20,
+                    )
+                except requests.exceptions.RequestException as exc:
+                    # panne de connexion (TCP refuse, DNS, timeout...) -- pas
+                    # la peine de reessayer LE MEME miroir, on passe au suivant
+                    last_error = exc
+                    r = None
+                    break
+                if r.status_code == 200:
+                    break
+                if r.status_code == 429:
+                    # respecter Retry-After si fourni, sinon attendre plus longtemps
+                    # qu'une simple erreur serveur (429 = on nous demande explicitement
+                    # de ralentir, pas juste une panne transitoire)
+                    wait = int(r.headers.get("Retry-After", 20 * (attempt + 1)))
+                    if attempt < 2:
+                        time.sleep(wait)
+                        continue
+                elif r.status_code in (502, 503, 504) and attempt < 2:
+                    time.sleep(5 * (attempt + 1))
                     continue
-            elif r.status_code in (502, 503, 504) and attempt < 2:
-                time.sleep(5 * (attempt + 1))
-                continue
-            break
-        if r.status_code != 200:
-            raise RuntimeError(f"Overpass indisponible (HTTP {r.status_code})")
+                break
+            if r is not None and r.status_code == 200:
+                got_response = True
+                break
+            if r is not None:
+                last_error = RuntimeError(f"HTTP {r.status_code}")
+        if not got_response:
+            continue
         elements = r.json().get("elements", [])
         radius_used = radius
         if elements:
             break
 
+    if not elements and last_error is not None and radius_used is None:
+        raise RuntimeError(f"Overpass indisponible sur tous les miroirs ({last_error})")
     if not elements:
         raise RuntimeError(f"Aucune rue trouvee via OpenStreetMap, meme jusqu'a {radius_used} m.")
     if radius_used > OVERPASS_SEARCH_RADIUS_M:
