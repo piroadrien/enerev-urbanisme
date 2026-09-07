@@ -64,7 +64,7 @@ def _find_python_with_qgis() -> str:
 
 _WORKER_SCRIPT = """
 import sys, json
-from qgis.core import QgsApplication, QgsProject, QgsLayoutExporter, QgsReport
+from qgis.core import QgsApplication, QgsProject, QgsLayoutExporter, QgsReport, QgsRasterLayer
 
 qgz_path, output_dir, report_names_json = sys.argv[1], sys.argv[2], sys.argv[3]
 report_names = json.loads(report_names_json)
@@ -77,6 +77,18 @@ if not project.read(qgz_path):
     print(json.dumps({"error": f"Impossible d'ouvrir le projet : {qgz_path}"}))
     qgs.exitQgis()
     sys.exit(1)
+
+# Diagnostic des couches raster (WMS notamment) -- imprime sur stdout avec
+# le prefixe DIAG: pour etre facilement repere dans les logs Streamlit
+# Cloud. Ajoute suite a des rapports d'Adrien de couche 'Routes' (WMS IGN
+# Geoportail) absente sans aucune trace d'erreur exploitable jusqu'ici.
+for layer in project.mapLayers().values():
+    if isinstance(layer, QgsRasterLayer):
+        err = layer.error()
+        err_summary = err.summary() if not err.isEmpty() else ""
+        provider = layer.dataProvider()
+        prov_valid = provider.isValid() if provider else None
+        print(f"DIAG: raster '{layer.name()}' isValid={layer.isValid()} providerValid={prov_valid} error={err_summary!r}")
 
 # Les Rapports (QgsReport) ET les mises en page classiques (QgsPrintLayout)
 # vivent tous les deux dans layoutManager() -- il n'y a pas de
@@ -132,6 +144,14 @@ def export_dp_pdfs(qgz_path: Path, output_dir: Path, python_bin: str = None) -> 
 
     if proc.returncode != 0:
         raise RuntimeError(f"Le script PyQGIS a echoue (code {proc.returncode}).\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
+
+    # les lignes "DIAG:" (diagnostic des couches raster/WMS) precedent le
+    # JSON final -- on les affiche systematiquement (succes ou echec) pour
+    # qu'elles apparaissent dans les logs Streamlit Cloud, meme quand tout
+    # se passe bien par ailleurs.
+    for line in proc.stdout.strip().splitlines():
+        if line.startswith("DIAG:"):
+            print(f"  [pdf_export] {line}")
 
     # la derniere ligne de stdout doit etre le JSON de resultats (QGIS peut
     # ecrire d'autres messages/warnings sur stdout avant)

@@ -656,17 +656,18 @@ def get_street_orientation(lat: float, lon: float) -> dict:
         got_response = False
         for mirror in OVERPASS_MIRRORS:
             r = None
-            for attempt in range(3):
+            for attempt in range(2):
                 try:
                     r = requests.post(
                         mirror, data={"data": query},
                         headers={"User-Agent": "enerev-dp-tool/1.0 (contact: adrien.piro@enerev.fr)"},
-                        timeout=20,
+                        timeout=10,
                     )
                 except requests.exceptions.RequestException as exc:
                     # panne de connexion (TCP refuse, DNS, timeout...) -- pas
                     # la peine de reessayer LE MEME miroir, on passe au suivant
                     last_error = exc
+                    print(f"  [Overpass] {mirror} : echec ({exc})", file=sys.stderr)
                     r = None
                     break
                 if r.status_code == 200:
@@ -675,11 +676,11 @@ def get_street_orientation(lat: float, lon: float) -> dict:
                     # respecter Retry-After si fourni, sinon attendre plus longtemps
                     # qu'une simple erreur serveur (429 = on nous demande explicitement
                     # de ralentir, pas juste une panne transitoire)
-                    wait = int(r.headers.get("Retry-After", 20 * (attempt + 1)))
-                    if attempt < 2:
+                    wait = int(r.headers.get("Retry-After", 15 * (attempt + 1)))
+                    if attempt < 1:
                         time.sleep(wait)
                         continue
-                elif r.status_code in (502, 503, 504) and attempt < 2:
+                elif r.status_code in (502, 503, 504) and attempt < 1:
                     time.sleep(5 * (attempt + 1))
                     continue
                 break
@@ -688,6 +689,7 @@ def get_street_orientation(lat: float, lon: float) -> dict:
                 break
             if r is not None:
                 last_error = RuntimeError(f"HTTP {r.status_code}")
+                print(f"  [Overpass] {mirror} : echec (HTTP {r.status_code})", file=sys.stderr)
         if not got_response:
             continue
         elements = r.json().get("elements", [])
