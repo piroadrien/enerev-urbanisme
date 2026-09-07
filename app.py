@@ -13,6 +13,7 @@ depasse les limites.
 """
 
 import shutil
+import subprocess
 import tempfile
 import traceback
 from pathlib import Path
@@ -22,8 +23,29 @@ import streamlit as st
 from generate_dp import run_pipeline
 from cerfa_export import build_gnau_package, stamp_bordereau_checkboxes
 
+
+def _deployed_commit() -> str:
+    """Lit le commit git actuellement deploye, directement depuis le
+    depot clone par Streamlit Cloud (qui inclut le dossier .git). Affiche
+    dans l'appli pour lever definitivement toute ambiguite sur la version
+    reellement en cours d'execution -- plusieurs corrections recentes se
+    sont averees deja presentes dans le code source mais pas encore
+    visibles en production, le temps que Streamlit Cloud redeploie."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short=10", "HEAD"],
+            cwd=Path(__file__).parent, capture_output=True, text=True, timeout=5,
+        )
+        if out.returncode == 0:
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "inconnu"
+
+
 st.set_page_config(page_title="Generateur de dossier DP", page_icon="📐")
 st.title("📐 Generateur de dossier DP")
+st.caption(f"Version deployee : commit `{_deployed_commit()}`")
 st.caption("A partir d'un numero de projet OpenSolar : cadastre, panneaux, Street View, et mise en page QGIS pretes.")
 
 with st.form("dp_form"):
