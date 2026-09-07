@@ -650,10 +650,18 @@ def get_street_orientation(lat: float, lon: float) -> dict:
     elements = []
     radius_used = None
     last_error = None
+    connectivity_dead = False  # tous les miroirs ont echoue par panne reseau
+    # (pas juste "aucune rue a ce rayon") -- inutile de reessayer aux rayons
+    # plus larges dans ce cas, l'echec sera identique (constate : sans cette
+    # coupure, les memes 3 echecs de connexion se repetaient 3 fois de
+    # suite, une fois par rayon, pour rien).
 
     for radius in (OVERPASS_SEARCH_RADIUS_M, 100, 200):
+        if connectivity_dead:
+            break
         query = f"[out:json][timeout:15];way(around:{radius},{lat},{lon})[highway];out geom;"
         got_response = False
+        any_mirror_reached = False
         for mirror in OVERPASS_MIRRORS:
             r = None
             for attempt in range(2):
@@ -661,7 +669,7 @@ def get_street_orientation(lat: float, lon: float) -> dict:
                     r = requests.post(
                         mirror, data={"data": query},
                         headers={"User-Agent": "enerev-dp-tool/1.0 (contact: adrien.piro@enerev.fr)"},
-                        timeout=10,
+                        timeout=25,
                     )
                 except requests.exceptions.RequestException as exc:
                     # panne de connexion (TCP refuse, DNS, timeout...) -- pas
@@ -686,11 +694,17 @@ def get_street_orientation(lat: float, lon: float) -> dict:
                 break
             if r is not None and r.status_code == 200:
                 got_response = True
+                any_mirror_reached = True
                 break
             if r is not None:
+                any_mirror_reached = True
                 last_error = RuntimeError(f"HTTP {r.status_code}")
                 print(f"  [Overpass] {mirror} : echec (HTTP {r.status_code})", file=sys.stderr)
         if not got_response:
+            if not any_mirror_reached:
+                # panne reseau pure sur TOUS les miroirs -- pas la peine
+                # d'elargir le rayon, ca echouera pareil
+                connectivity_dead = True
             continue
         elements = r.json().get("elements", [])
         radius_used = radius
