@@ -793,6 +793,77 @@ def get_heading_fallback_from_panorama(lat: float, lon: float, api_key: str) -> 
     raise RuntimeError(f"Aucune couverture Street View trouvee, meme jusqu'a 1000 m (status={last_status}).")
 
 
+def estimate_heading_from_building_footprint(ring: list, ref_x: float, ref_y: float):
+    """Estime l'azimut 'face a la rue' a partir du plus long cote du
+    polygone batiment (repli quand Overpass echoue totalement -- constate
+    a plusieurs reprises en production, cf. courriers d'Adrien des
+    06-07/09/2026 : les 3 miroirs echouent parfois simultanement).
+
+    Principe : pour un batiment residentiel a peu pres rectangulaire, le
+    plus long cote du polygone correspond generalement a la facade
+    principale, qui court parallelement a la rue. La perpendiculaire a ce
+    cote donne donc une estimation raisonnable de l'azimut recherche.
+    Deux perpendiculaires sont possibles (rue devant OU derriere le
+    batiment) : on choisit celle qui pointe vers `ref_x, ref_y` (l'adresse
+    geocodee, qui tombe generalement du cote rue) depuis le centre du
+    batiment.
+
+    Avantage cle : n'utilise QUE des donnees deja telechargees (cadastre
+    Etalab, deja necessaire pour la parcelle) -- aucun appel reseau
+    supplementaire, donc aucune nouvelle dependance a un service tiers
+    dont la fiabilite echappe a ce pipeline (contrairement a Overpass).
+    C'est une estimation, pas une mesure : peut se tromper sur un
+    batiment tres irregulier ou en L ou le plus long cote ne longe pas la
+    rue -- mais reste nettement plus proche d'une perpendiculaire reelle
+    qu'un simple cap brut vers une position Street View.
+    """
+    pts = ring[:-1] if ring[0] == ring[-1] else ring
+    m = len(pts)
+    best_len2, best_edge = -1.0, None
+    for i in range(m):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % m]
+        dx, dy = x2 - x1, y2 - y1
+        length2 = dx * dx + dy * dy
+        if length2 > best_len2:
+            best_len2, best_edge = length2, (dx, dy)
+
+    dx, dy = best_edge
+    edge_bearing = math.degrees(math.atan2(dx, dy)) % 180  # ligne non orientee
+    perp_a, perp_b = (edge_bearing + 90) % 360, (edge_bearing - 90) % 360
+
+    cx = sum(p[0] for p in pts) / m
+    cy = sum(p[1] for p in pts) / m
+    bearing_to_ref = math.degrees(math.atan2(ref_x - cx, ref_y - cy)) % 360
+
+    def angular_diff(a, b):
+        d = abs(a - b) % 360
+        return min(d, 360 - d)
+
+    return perp_a if angular_diff(perp_a, bearing_to_ref) < angular_diff(perp_b, bearing_to_ref) else perp_b
+
+
+def get_heading_fallback_from_building(lat: float, lon: float, cadastre_gpkg: Path, ogr2ogr_path: str) -> dict:
+    """Repli 'niveau 2' quand Overpass est totalement indisponible : estime
+    l'azimut a partir de l'empreinte du batiment (cadastre Etalab, deja
+    telecharge) plutot que de tomber directement sur le repli 'niveau 3'
+    (cap brut vers la position Street View, qui ne cherche meme pas a etre
+    perpendiculaire a la rue -- cf. get_heading_fallback_from_panorama)."""
+    from parcelle_lookup import find_nearest_bati_ring
+
+    x, y = lambert93_forward(lon, lat)
+    ring = find_nearest_bati_ring(cadastre_gpkg, ogr2ogr_path, x, y)
+    if ring is None or len(ring) < 4:
+        raise RuntimeError("Aucun batiment trouve pres du point pour estimer l'azimut.")
+
+    heading_property = estimate_heading_from_building_footprint(ring, x, y)
+    return {
+        "road_bearing": None, "heading_property": heading_property,
+        "distance_to_road_m": None, "source": "empreinte_batiment",
+        "cam_lat": lat, "cam_lon": lon,
+    }
+
+
 def fetch_streetview_image(lat, lon, heading, api_key, out_path, size=STREETVIEW_SIZE, fov=STREETVIEW_FOV, pitch=0):
     params = {"size": size, "location": f"{lat},{lon}", "heading": heading, "fov": fov, "pitch": pitch, "key": api_key}
     r = requests.get(STREETVIEW_IMAGE_URL, params=params, timeout=30)
@@ -804,28 +875,35 @@ def fetch_streetview_image(lat, lon, heading, api_key, out_path, size=STREETVIEW
 STREETVIEW_PHOTO_FILENAMES = ["Photo_rue_dp7.jpg", "Photo_gauche_dp8.jpg", "Photo_droite_dp8.jpg"]
 
 
-def update_streetview_photos(lat, lon, api_key, work_dir: Path):
+def update_streetview_photos(lat, lon, api_key, work_dir: Path, cadastre_gpkg: Path = None, ogr2ogr_path: str = None):
     try:
         street = get_street_orientation(lat, lon)
     except Exception as exc:
-        print(f"  Overpass indisponible ({exc}) -> repli sur la position du point de vue Street View", file=sys.stderr)
-        try:
-            street = get_heading_fallback_from_panorama(lat, lon, api_key)
-        except Exception as exc2:
-            # aucune des deux methodes n'a fonctionne : on supprime les
-            # eventuelles photos d'un AUTRE projet plutot que de les laisser
-            # silencieusement en place (mieux vaut un DP7/DP8 vide et visible
-            # a completer, qu'une mauvaise photo qui passe inapercue)
-            removed = []
-            for filename in STREETVIEW_PHOTO_FILENAMES:
-                fp = work_dir / filename
-                if fp.exists():
-                    fp.unlink()
-                    removed.append(filename)
-            msg = f"Aucune couverture disponible ici, ni via OSM ni via Street View ({exc2})."
-            if removed:
-                msg += f" Anciennes photos supprimees ({', '.join(removed)}) pour eviter de reutiliser celles d'un autre projet."
-            raise RuntimeError(msg)
+        print(f"  Overpass indisponible ({exc}) -> repli sur l'empreinte du batiment", file=sys.stderr)
+        street = None
+        if cadastre_gpkg is not None and ogr2ogr_path is not None:
+            try:
+                street = get_heading_fallback_from_building(lat, lon, cadastre_gpkg, ogr2ogr_path)
+            except Exception as exc_bati:
+                print(f"  Empreinte du batiment indisponible aussi ({exc_bati}) -> repli sur la position du point de vue Street View", file=sys.stderr)
+        if street is None:
+            try:
+                street = get_heading_fallback_from_panorama(lat, lon, api_key)
+            except Exception as exc2:
+                # aucune des methodes n'a fonctionne : on supprime les
+                # eventuelles photos d'un AUTRE projet plutot que de les laisser
+                # silencieusement en place (mieux vaut un DP7/DP8 vide et visible
+                # a completer, qu'une mauvaise photo qui passe inapercue)
+                removed = []
+                for filename in STREETVIEW_PHOTO_FILENAMES:
+                    fp = work_dir / filename
+                    if fp.exists():
+                        fp.unlink()
+                        removed.append(filename)
+                msg = f"Aucune couverture disponible ici, ni via OSM ni via Street View ({exc2})."
+                if removed:
+                    msg += f" Anciennes photos supprimees ({', '.join(removed)}) pour eviter de reutiliser celles d'un autre projet."
+                raise RuntimeError(msg)
 
     heading_property = street["heading_property"]
     heading_left = (heading_property - 90) % 360
@@ -1793,7 +1871,8 @@ def run_pipeline(
     vues_gpkg = project_dir / "Vues_prises.gpkg"
     if google_api_key:
         try:
-            street_info = update_streetview_photos(geo["lat"], geo["lon"], google_api_key, project_dir)
+            street_info = update_streetview_photos(geo["lat"], geo["lon"], google_api_key, project_dir,
+                                                     cadastre_gpkg=cadastre_gpkg, ogr2ogr_path=ogr2ogr_path)
             # points ET angles des prises de vue reportes sur le plan de
             # situation et le plan de masse -- suite au courrier
             # d'incompletude Osny du 30/06/2026 (DPC1/DPC2, art. R. 431-10 d)).

@@ -93,6 +93,87 @@ def _geometry_centroid(geometry: dict) -> tuple:
     return (0.0, 0.0)
 
 
+def find_nearest_bati_ring(
+    cadastre_gpkg: Path,
+    ogr2ogr_path: str,
+    x: float,
+    y: float,
+    layer_name: str = "Bati",
+    buffer_m: float = 40.0,
+    target_srs: str = "EPSG:2154",
+) -> Optional[list]:
+    """Renvoie l'anneau exterieur (liste de [x,y] en Lambert-93) du batiment
+    (couche 'Bati') qui contient le point, ou a defaut le plus proche par
+    centroide. None si aucun batiment dans le buffer.
+
+    Utilise pour estimer l'orientation de la rue SANS aucun appel reseau
+    supplementaire quand Overpass est indisponible (cf. estimate_heading_
+    from_building_footprint dans generate_dp.py) : le plus long cote d'un
+    batiment residentiel typique court generalement parallelement a la
+    rue -- une estimation imparfaite mais bien plus fiable qu'un simple
+    cap brut vers une position Street View, et qui ne depend d'aucun
+    service tiers en plus de ceux (Etalab) deja necessaires par ailleurs.
+    """
+    tmp_geojson = Path(cadastre_gpkg).parent / "_tmp_bati_query.geojson"
+    tmp_geojson.unlink(missing_ok=True)
+
+    xmin, ymin = x - buffer_m, y - buffer_m
+    xmax, ymax = x + buffer_m, y + buffer_m
+
+    cmd = [
+        ogr2ogr_path, "-f", "GeoJSON", str(tmp_geojson), str(cadastre_gpkg),
+        layer_name,
+        "-t_srs", target_srs, "-spat_srs", target_srs,
+        "-spat", str(xmin), str(ymin), str(xmax), str(ymax),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ogr2ogr a echoue lors de la recherche de batiment :\n{result.stderr}")
+
+    if not tmp_geojson.exists():
+        return None
+
+    try:
+        data = json.loads(tmp_geojson.read_text(encoding="utf-8"))
+    finally:
+        tmp_geojson.unlink(missing_ok=True)
+
+    features = data.get("features", [])
+    if not features:
+        return None
+
+    def outer_ring(geom):
+        gtype = geom.get("type")
+        coords = geom.get("coordinates")
+        if gtype == "Polygon":
+            return coords[0]
+        if gtype == "MultiPolygon":
+            # le plus grand polygone du multi (par etendue approx.)
+            return max(coords, key=lambda poly: len(poly[0]))[0]
+        return None
+
+    # 1) le batiment qui contient le point
+    for feat in features:
+        geom = feat.get("geometry")
+        if geom and _point_in_polygon(x, y, geom):
+            ring = outer_ring(geom)
+            if ring:
+                return ring
+
+    # 2) a defaut, le plus proche par centroide
+    best, best_dist = None, None
+    for feat in features:
+        geom = feat.get("geometry")
+        if not geom:
+            continue
+        cx, cy = _geometry_centroid(geom)
+        d = (cx - x) ** 2 + (cy - y) ** 2
+        if best_dist is None or d < best_dist:
+            best_dist, best = d, geom
+
+    return outer_ring(best) if best is not None else None
+
+
 def find_parcelle(
     cadastre_gpkg: Path,
     ogr2ogr_path: str,
