@@ -80,15 +80,27 @@ if not project.read(qgz_path):
 
 # Diagnostic des couches raster (WMS notamment) -- imprime sur stdout avec
 # le prefixe DIAG: pour etre facilement repere dans les logs Streamlit
-# Cloud. Ajoute suite a des rapports d'Adrien de couche 'Routes' (WMS IGN
-# Geoportail) absente sans aucune trace d'erreur exploitable jusqu'ici.
-for layer in project.mapLayers().values():
-    if isinstance(layer, QgsRasterLayer):
-        err = layer.error()
-        err_summary = err.summary() if not err.isEmpty() else ""
-        provider = layer.dataProvider()
-        prov_valid = provider.isValid() if provider else None
-        print(f"DIAG: raster '{layer.name()}' isValid={layer.isValid()} providerValid={prov_valid} error={err_summary!r}")
+# Cloud. Version durcie : la premiere tentative n'a produit AUCUNE ligne
+# DIAG dans les logs de production (meme apres redemarrage complet et
+# execution confirmee -- les lignes Overpass du MEME run, elles,
+# apparaissaient bien). Cause exacte inconnue -- flush() explicite ajoute
+# par precaution, et un marqueur de depart imprime AVANT la boucle pour
+# distinguer "la boucle ne s'exécute pas du tout" de "elle s'execute mais
+# ne trouve aucune couche raster".
+all_layers = list(project.mapLayers().values())
+print(f"DIAG: {len(all_layers)} couche(s) dans le projet", flush=True)
+for layer in all_layers:
+    try:
+        is_raster = isinstance(layer, QgsRasterLayer)
+        print(f"DIAG: '{layer.name()}' type={type(layer).__name__} raster={is_raster}", flush=True)
+        if is_raster:
+            err = layer.error()
+            err_summary = err.summary() if not err.isEmpty() else ""
+            provider = layer.dataProvider()
+            prov_valid = provider.isValid() if provider else None
+            print(f"DIAG:   isValid={layer.isValid()} providerValid={prov_valid} error={err_summary!r}", flush=True)
+    except Exception as exc:
+        print(f"DIAG: erreur pendant le diagnostic de la couche : {type(exc).__name__}: {exc}", flush=True)
 
 # Les Rapports (QgsReport) ET les mises en page classiques (QgsPrintLayout)
 # vivent tous les deux dans layoutManager() -- il n'y a pas de
@@ -125,7 +137,7 @@ for name in report_names:
         results[label] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 qgs.exitQgis()
-print(json.dumps(results))
+print(json.dumps(results), flush=True)
 """
 
 
@@ -142,16 +154,21 @@ def export_dp_pdfs(qgz_path: Path, output_dir: Path, python_bin: str = None) -> 
     cmd = [python_bin, str(script_path), str(qgz_path), str(output_dir), json.dumps(REPORT_NAMES)]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=_HEADLESS_ENV)
 
+    # les lignes "DIAG:" (diagnostic des couches raster/WMS) precedent le
+    # JSON final -- affichees systematiquement (succes ou echec) pour
+    # apparaitre dans les logs Streamlit Cloud. Fait AVANT le parsing JSON
+    # et AVANT le controle du returncode : si le worker crashe malgre tout,
+    # on veut quand meme voir ce qui a ete imprime avant le crash.
+    diag_lines = [l for l in proc.stdout.splitlines() if l.startswith("DIAG:")]
+    if diag_lines:
+        for line in diag_lines:
+            print(f"  [pdf_export] {line}")
+    else:
+        print("  [pdf_export] (aucune ligne DIAG recue -- stdout brut ci-dessous)")
+        print(f"  [pdf_export] stdout complet : {proc.stdout!r}")
+
     if proc.returncode != 0:
         raise RuntimeError(f"Le script PyQGIS a echoue (code {proc.returncode}).\nstdout: {proc.stdout}\nstderr: {proc.stderr}")
-
-    # les lignes "DIAG:" (diagnostic des couches raster/WMS) precedent le
-    # JSON final -- on les affiche systematiquement (succes ou echec) pour
-    # qu'elles apparaissent dans les logs Streamlit Cloud, meme quand tout
-    # se passe bien par ailleurs.
-    for line in proc.stdout.strip().splitlines():
-        if line.startswith("DIAG:"):
-            print(f"  [pdf_export] {line}")
 
     # la derniere ligne de stdout doit etre le JSON de resultats (QGIS peut
     # ecrire d'autres messages/warnings sur stdout avant)
