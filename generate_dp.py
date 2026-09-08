@@ -720,7 +720,7 @@ def get_street_orientation(lat: float, lon: float) -> dict:
                     # panne de connexion (TCP refuse, DNS, timeout...) -- pas
                     # la peine de reessayer LE MEME miroir, on passe au suivant
                     last_error = exc
-                    print(f"  [Overpass] {mirror} : echec ({exc})", file=sys.stderr)
+                    print(f"  [Overpass] {mirror} : echec ({exc})", file=sys.stderr, flush=True)
                     r = None
                     break
                 if r.status_code == 200:
@@ -744,7 +744,7 @@ def get_street_orientation(lat: float, lon: float) -> dict:
             if r is not None:
                 any_mirror_reached = True
                 last_error = RuntimeError(f"HTTP {r.status_code}")
-                print(f"  [Overpass] {mirror} : echec (HTTP {r.status_code})", file=sys.stderr)
+                print(f"  [Overpass] {mirror} : echec (HTTP {r.status_code})", file=sys.stderr, flush=True)
         if not got_response:
             if not any_mirror_reached:
                 # panne reseau pure sur TOUS les miroirs -- pas la peine
@@ -1006,16 +1006,16 @@ def update_streetview_photos(lat, lon, api_key, work_dir: Path, cadastre_gpkg: P
     try:
         street = get_street_orientation_from_google(lat, lon, api_key)
     except Exception as exc_google:
-        print(f"  Map Tiles API indisponible ({exc_google}) -> repli sur Overpass/OSM", file=sys.stderr)
+        print(f"  Map Tiles API indisponible ({exc_google}) -> repli sur Overpass/OSM", file=sys.stderr, flush=True)
         try:
             street = get_street_orientation(lat, lon)
         except Exception as exc:
-            print(f"  Overpass indisponible ({exc}) -> repli sur l'empreinte du batiment", file=sys.stderr)
+            print(f"  Overpass indisponible ({exc}) -> repli sur l'empreinte du batiment", file=sys.stderr, flush=True)
             if cadastre_gpkg is not None and ogr2ogr_path is not None:
                 try:
                     street = get_heading_fallback_from_building(lat, lon, cadastre_gpkg, ogr2ogr_path)
                 except Exception as exc_bati:
-                    print(f"  Empreinte du batiment indisponible aussi ({exc_bati}) -> repli sur la position du point de vue Street View", file=sys.stderr)
+                    print(f"  Empreinte du batiment indisponible aussi ({exc_bati}) -> repli sur la position du point de vue Street View", file=sys.stderr, flush=True)
             if street is None:
                 try:
                     street = get_heading_fallback_from_panorama(lat, lon, api_key)
@@ -1043,8 +1043,13 @@ def update_streetview_photos(lat, lon, api_key, work_dir: Path, cadastre_gpkg: P
     fetch_streetview_image(lat, lon, heading_left, api_key, work_dir / "Photo_gauche_dp8.jpg")
     fetch_streetview_image(lat, lon, heading_right, api_key, work_dir / "Photo_droite_dp8.jpg")
 
-    source_label = "OSM (rue reelle)" if street["source"] == "osm" else "repli point de vue (Overpass indisponible)"
-    print(f"  [{source_label}] azimuts : face={heading_property:.0f}° gauche={heading_left:.0f}° droite={heading_right:.0f}°")
+    source_labels = {
+        "osm": "OSM (rue reelle)",
+        "empreinte_batiment": "empreinte du batiment (repli)",
+        "pano": "position brute Street View (dernier repli)",
+    }
+    source_label = source_labels.get(street["source"], street["source"])
+    print(f"  [{source_label}] azimuts : face={heading_property:.0f}° gauche={heading_left:.0f}° droite={heading_right:.0f}°", flush=True)
 
     # renvoye pour permettre a l'appelant de reporter le point ET les angles
     # de prise de vue sur le plan de situation (DP1) et le plan de masse (DP2)
