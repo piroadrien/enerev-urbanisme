@@ -27,12 +27,18 @@ from pathlib import Path
 
 REPORT_NAMES = ["DP 1", "DP 2", "DP 4", "DP 6", "DP 7", "DP 8"]
 
-# QGIS/Qt a besoin d'un affichage meme en mode "headless". Plutot que
-# d'installer un serveur X virtuel (xvfb), on force le plugin Qt
-# "offscreen", qui ne necessite aucune dependance systeme supplementaire.
-# Sans effet sur Windows (variable simplement ignoree) -- l'affichage y
-# est deja disponible normalement.
-_HEADLESS_ENV = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
+# QGIS/Qt a besoin d'un affichage meme en mode "headless". Sur Linux (ex:
+# Streamlit Cloud, sans serveur X), on force le plugin Qt "offscreen" --
+# aucune dependance systeme supplementaire (pas besoin d'un xvfb). Sur
+# Windows, NE PAS forcer cette variable : Qt la respecte partout, et le
+# plugin "offscreen" n'y charge pas correctement les polices systeme --
+# constate par Adrien (08/09/2026) : tout le texte s'affichait en carres
+# (glyphes manquants) une fois l'export PDF fonctionnel sous Windows.
+# Windows dispose deja d'un sous-systeme d'affichage natif meme en usage
+# "sans interface" -- inutile d'y forcer un mode alternatif.
+_HEADLESS_ENV = dict(os.environ)
+if not sys.platform.startswith("win"):
+    _HEADLESS_ENV["QT_QPA_PLATFORM"] = "offscreen"
 
 # Candidats a essayer, dans l'ordre : le 'python3' de Streamlit (resolu via
 # PATH) n'est PAS forcement celui ou l'apt-get de python3-qgis a installe
