@@ -17,10 +17,12 @@ Usage prevu :
     # -> {"DP1": Path(".../DP1.pdf"), "DP2": Path(...), ...}
 """
 
+import glob
 import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 REPORT_NAMES = ["DP 1", "DP 2", "DP 4", "DP 6", "DP 7", "DP 8"]
@@ -28,6 +30,8 @@ REPORT_NAMES = ["DP 1", "DP 2", "DP 4", "DP 6", "DP 7", "DP 8"]
 # QGIS/Qt a besoin d'un affichage meme en mode "headless". Plutot que
 # d'installer un serveur X virtuel (xvfb), on force le plugin Qt
 # "offscreen", qui ne necessite aucune dependance systeme supplementaire.
+# Sans effet sur Windows (variable simplement ignoree) -- l'affichage y
+# est deja disponible normalement.
 _HEADLESS_ENV = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
 
 # Candidats a essayer, dans l'ordre : le 'python3' de Streamlit (resolu via
@@ -44,14 +48,46 @@ _PYTHON_CANDIDATES = [
 ]
 
 
+def _windows_python_candidates() -> list:
+    """Sur Windows, l'interpreteur avec les bindings QGIS est celui fourni
+    PAR l'installation QGIS elle-meme (pas le Python "normal" installe a
+    cote) -- ni sur le PATH, ni au meme endroit que la commande ogr2ogr.
+    On privilegie 'python-qgis*.bat' (script qui configure les variables
+    d'environnement necessaires -- GDAL_DATA, PROJ_LIB, DLL PATH -- avant
+    de lancer python3.exe) plutot que python3.exe directement, plus fiable
+    sur Windows a cause de cette configuration d'environnement."""
+    candidates = []
+    for base in (r"C:\Program Files", r"C:\Program Files (x86)", r"C:\OSGeo4W", r"C:\OSGeo4W64"):
+        for pattern in ("QGIS*\\bin\\python-qgis*.bat", "bin\\python-qgis*.bat",
+                         "QGIS*\\bin\\python3.exe", "bin\\python3.exe"):
+            candidates += glob.glob(os.path.join(base, pattern))
+    return sorted(set(candidates), reverse=True)  # version la plus recente en premier
+
+
+def _python_invocation(python_bin: str, args: list) -> list:
+    """Construit la commande a executer. Un '.bat' ne peut pas etre lance
+    directement par subprocess sur Windows (CreateProcess a besoin de
+    l'interpreteur de commandes) -- il faut passer par 'cmd /c'."""
+    if python_bin.lower().endswith(".bat"):
+        return ["cmd", "/c", python_bin] + args
+    return [python_bin] + args
+
+
 def _find_python_with_qgis() -> str:
+    candidates = list(_PYTHON_CANDIDATES)
+    if sys.platform.startswith("win"):
+        candidates = _windows_python_candidates() + candidates
+
     tried = []
-    for candidate in _PYTHON_CANDIDATES:
+    for candidate in candidates:
         exe = candidate if Path(candidate).is_absolute() else shutil.which(candidate)
         if not exe or not Path(exe).exists():
             tried.append(f"{candidate} (introuvable)")
             continue
-        check = subprocess.run([exe, "-c", "import qgis.core"], capture_output=True, text=True, env=_HEADLESS_ENV)
+        check = subprocess.run(
+            _python_invocation(exe, ["-c", "import qgis.core"]),
+            capture_output=True, text=True, env=_HEADLESS_ENV,
+        )
         if check.returncode == 0:
             return exe
         tried.append(f"{exe} ({check.stderr.strip().splitlines()[-1] if check.stderr else 'echec'})")
@@ -59,7 +95,9 @@ def _find_python_with_qgis() -> str:
     raise RuntimeError(
         "Aucun interpreteur Python avec le module 'qgis' trouve. Essaye : " + " | ".join(tried) +
         ". Verifie que 'python3-qgis' est bien installe (packages.txt) et localise le bon binaire "
-        "(ex: 'dpkg -L python3-qgis | grep site-packages' dans un shell sur la meme machine)."
+        "(ex: 'dpkg -L python3-qgis | grep site-packages' dans un shell sur la meme machine). "
+        "Sous Windows, verifie que QGIS Desktop est bien installe (le fichier "
+        "'python-qgis.bat' ou 'python-qgis-ltr.bat' doit exister dans le dossier bin\\ de l'installation)."
     )
 
 _WORKER_SCRIPT = """
@@ -151,7 +189,7 @@ def export_dp_pdfs(qgz_path: Path, output_dir: Path, python_bin: str = None) -> 
     script_path = output_dir / "_pyqgis_worker.py"
     script_path.write_text(_WORKER_SCRIPT, encoding="utf-8")
 
-    cmd = [python_bin, str(script_path), str(qgz_path), str(output_dir), json.dumps(REPORT_NAMES)]
+    cmd = _python_invocation(python_bin, [str(script_path), str(qgz_path), str(output_dir), json.dumps(REPORT_NAMES)])
     proc = subprocess.run(cmd, capture_output=True, text=True, env=_HEADLESS_ENV)
 
     # les lignes "DIAG:" (diagnostic des couches raster/WMS) precedent le
