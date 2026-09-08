@@ -969,21 +969,43 @@ def get_street_orientation_from_google(lat: float, lon: float, api_key: str, rad
 
     pano_lat, pano_lon = meta["lat"], meta["lng"]
     links = meta.get("links") or []
+    pano_heading = meta.get("heading")
 
-    if len(links) >= 2:
+    def angular_diff_180(a, b):
+        d = abs(a - b) % 180
+        return min(d, 180 - d)
+
+    # Le cap du panorama lui-meme (relevé du vehicule) sert de reference
+    # fiable pour l'axe de la rue -- contrairement aux liens, il n'est pas
+    # perturbe par un carrefour proche (un lien peut partir vers une rue
+    # perpendiculaire, ce qui fausserait completement une simple moyenne
+    # de tous les liens disponibles). On ne retient donc que les liens
+    # dont le cap est globalement aligne (a 30° pres, mod 180 -- une rue
+    # n'a pas de "sens") avec le cap du panorama, et on les moyenne entre
+    # eux pour affiner (plus precis qu'un seul releve) ; sinon, repli sur
+    # le cap du panorama seul.
+    reference = (pano_heading % 180) if pano_heading is not None else None
+    aligned = [h for h in links if reference is None or angular_diff_180(h["heading"] % 180, reference) <= 30]
+
+    print(f"  [Map Tiles API] pano heading={pano_heading} liens={[round(h['heading'],1) for h in links]} "
+          f"retenus={[round(h['heading'],1) for h in aligned]}", file=sys.stderr, flush=True)
+
+    if len(aligned) >= 2:
         # moyenne circulaire des caps mod 180 (une rue n'a pas de "sens" --
         # deux liens opposes a ~180° doivent converger vers le meme axe)
-        angles_mod180 = [h["heading"] % 180 for h in links]
+        angles_mod180 = [h["heading"] % 180 for h in aligned]
         sin_sum = sum(math.sin(math.radians(a * 2)) for a in angles_mod180)
         cos_sum = sum(math.cos(math.radians(a * 2)) for a in angles_mod180)
         road_bearing = (math.degrees(math.atan2(sin_sum, cos_sum)) / 2) % 180
-        source_detail = f"{len(links)} liens panorama"
-    elif len(links) == 1:
-        road_bearing = links[0]["heading"] % 180
-        source_detail = "1 lien panorama"
+        source_detail = f"{len(aligned)}/{len(links)} liens alignes avec le cap du panorama"
+    elif len(aligned) == 1:
+        road_bearing = aligned[0]["heading"] % 180
+        source_detail = "1 lien aligne avec le cap du panorama"
+    elif reference is not None:
+        road_bearing = reference
+        source_detail = f"cap du panorama seul ({len(links)} lien(s) ecarte(s) car non-alignes -- carrefour probable)"
     else:
-        road_bearing = meta.get("heading", 0.0) % 180
-        source_detail = "cap du panorama (aucun lien disponible)"
+        raise RuntimeError("Map Tiles API : ni cap de panorama ni lien exploitable pour estimer l'azimut.")
 
     perp_a, perp_b = (road_bearing + 90) % 360, (road_bearing - 90) % 360
     bearing_to_property = bearing_degrees(pano_lat, pano_lon, lat, lon)
