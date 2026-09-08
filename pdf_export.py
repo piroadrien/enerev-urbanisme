@@ -64,13 +64,21 @@ def _windows_python_candidates() -> list:
     return sorted(set(candidates), reverse=True)  # version la plus recente en premier
 
 
-def _python_invocation(python_bin: str, args: list) -> list:
-    """Construit la commande a executer. Un '.bat' ne peut pas etre lance
-    directement par subprocess sur Windows (CreateProcess a besoin de
-    l'interpreteur de commandes) -- il faut passer par 'cmd /c'."""
-    if python_bin.lower().endswith(".bat"):
-        return ["cmd", "/c", python_bin] + args
-    return [python_bin] + args
+def _run_qgis_python(python_bin: str, args: list, **kwargs):
+    """Execute python_bin avec args. Un '.bat' Windows a besoin de
+    shell=True pour que les chemins contenant des espaces (ex:
+    'C:\\Program Files\\QGIS 3.40.2\\bin\\python-qgis.bat') soient
+    correctement quotes -- construire manuellement ['cmd','/c',bat_path,
+    ...] ne suffit PAS : cmd.exe interprete alors le chemin de travers des
+    qu'il contient un espace, avec l'erreur classique "n'est pas reconnu
+    en tant que commande interne ou externe..." (constate par Adrien,
+    08/09/2026). Avec shell=True, Python quote correctement chaque element
+    de la liste (list2cmdline) avant de le transmettre au shell -- pas
+    besoin de le faire a la main.
+    """
+    is_bat = python_bin.lower().endswith(".bat")
+    cmd = [python_bin] + args
+    return subprocess.run(cmd, shell=is_bat, **kwargs)
 
 
 def _find_python_with_qgis() -> str:
@@ -84,8 +92,8 @@ def _find_python_with_qgis() -> str:
         if not exe or not Path(exe).exists():
             tried.append(f"{candidate} (introuvable)")
             continue
-        check = subprocess.run(
-            _python_invocation(exe, ["-c", "import qgis.core"]),
+        check = _run_qgis_python(
+            exe, ["-c", "import qgis.core"],
             capture_output=True, text=True, env=_HEADLESS_ENV,
         )
         if check.returncode == 0:
@@ -189,8 +197,10 @@ def export_dp_pdfs(qgz_path: Path, output_dir: Path, python_bin: str = None) -> 
     script_path = output_dir / "_pyqgis_worker.py"
     script_path.write_text(_WORKER_SCRIPT, encoding="utf-8")
 
-    cmd = _python_invocation(python_bin, [str(script_path), str(qgz_path), str(output_dir), json.dumps(REPORT_NAMES)])
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=_HEADLESS_ENV)
+    proc = _run_qgis_python(
+        python_bin, [str(script_path), str(qgz_path), str(output_dir), json.dumps(REPORT_NAMES)],
+        capture_output=True, text=True, env=_HEADLESS_ENV,
+    )
 
     # les lignes "DIAG:" (diagnostic des couches raster/WMS) precedent le
     # JSON final -- affichees systematiquement (succes ou echec) pour
