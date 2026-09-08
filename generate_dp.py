@@ -203,9 +203,24 @@ def list_systems(session, org_id, project_id, token):
     return r.json()
 
 
-def choose_system(systems, preselected=None):
+def choose_system(systems, preselected=None, interactive=False):
     """Meme logique que system_selection.py : auto si un seul systeme,
-    sinon preselection (uuid/index) ou prompt interactif."""
+    sinon preselection (uuid/index).
+
+    'interactive' controle le comportement de repli quand aucune
+    preselection ne correspond et qu'il y a plusieurs systemes : True
+    (reserve a l'usage CLI direct, cf. main()) demande a l'utilisateur au
+    clavier via input(). False (defaut, utilise par run_pipeline/l'appli
+    Streamlit) leve une RuntimeError explicite a la place.
+
+    Pourquoi ce changement : input() bloque indefiniment sans le moindre
+    message quand il est appele depuis l'appli Streamlit -- pas d'erreur
+    visible, juste un pipeline qui semble fige (constate par Adrien en
+    local le 08/09/2026 : le prompt attendait une reponse dans la fenetre
+    PowerShell, invisible depuis le navigateur). Un projet a plusieurs
+    systemes doit desormais produire un message clair, pas un blocage
+    silencieux.
+    """
     if not systems:
         return None
     if len(systems) == 1:
@@ -220,10 +235,19 @@ def choose_system(systems, preselected=None):
                 return systems[idx]
         except (TypeError, ValueError):
             pass
-    print(f"\n{len(systems)} systemes disponibles :")
-    for i, s in enumerate(systems):
-        marker = " (actuel)" if s.get("is_current") else ""
-        print(f"  [{i}] {s.get('name') or 'Sans nom'} — {s.get('kw_stc')} kWc{marker}")
+
+    listing = "\n".join(
+        f"  [{i}] {s.get('name') or 'Sans nom'} — {s.get('kw_stc')} kWc"
+        f"{' (actuel)' if s.get('is_current') else ''} (uuid={s.get('uuid')})"
+        for i, s in enumerate(systems)
+    )
+
+    if not interactive:
+        raise RuntimeError(
+            f"Ce projet a {len(systems)} systemes -- indique lequel utiliser :\n{listing}"
+        )
+
+    print(f"\n{len(systems)} systemes disponibles :\n{listing}")
     while True:
         choice = input(f"Choisissez le systeme [0-{len(systems)-1}] : ").strip()
         try:
@@ -1745,7 +1769,7 @@ def run_pipeline(
     project_id, dp_type, template, work_dir,
     org_id=None, token=None, username=None, password=None, mfa=None,
     system=None, moa_adresse=None, postcode=None,
-    google_api_key=None, out=None, log=print,
+    google_api_key=None, out=None, log=print, interactive=False,
 ):
     """
     Coeur du pipeline, importable (utilise par le CLI main() ci-dessous et
@@ -1779,7 +1803,7 @@ def run_pipeline(
     log(f"[2/8] Recuperation du projet {project_id}...")
     project = get_project_data(session, org_id, project_id, token)
     systems = list_systems(session, org_id, project_id, token)
-    system_obj = choose_system(systems, preselected=system)
+    system_obj = choose_system(systems, preselected=system, interactive=interactive)
     if not system_obj:
         raise RuntimeError("Aucun systeme trouve pour ce projet.")
     kwc = system_obj.get("kw_stc")
@@ -1962,7 +1986,7 @@ def main():
             project_id=args.project_id, dp_type=args.type, template=args.template, work_dir=args.work_dir,
             org_id=args.org_id, token=args.token, username=args.username, password=args.password, mfa=args.mfa,
             system=args.system, moa_adresse=args.moa_adresse, postcode=args.postcode,
-            google_api_key=args.google_api_key, out=args.out,
+            google_api_key=args.google_api_key, out=args.out, interactive=True,
         )
     except Exception as exc:
         print(f"\nErreur : {exc}", file=sys.stderr)

@@ -53,6 +53,12 @@ with st.form("dp_form"):
     dp_type = st.selectbox("Type d'installation", ["Toiture photovoltaïque", "Carport photovoltaïque"])
     postcode = st.text_input("Code postal (optionnel, aide au geocodage si adresse ambigue)")
     moa_adresse = st.text_input("Adresse du MOA si differente de l'adresse du site (optionnel)")
+    system = st.text_input(
+        "Systeme (optionnel -- uuid ou index, seulement si le projet en a plusieurs)",
+        help="Laisse vide si le projet n'a qu'un seul systeme. Si erreur "
+             "'ce projet a plusieurs systemes', l'erreur liste les uuid/index "
+             "disponibles a coller ici.",
+    )
     submitted = st.form_submit_button("Generer le dossier")
 
 if "dp_result" not in st.session_state:
@@ -84,6 +90,7 @@ if submitted:
                 google_api_key=st.secrets.get("google_api_key"),
                 moa_adresse=moa_adresse or None,
                 postcode=postcode or None,
+                system=system.strip() or None,
                 log=log,
             )
 
