@@ -133,7 +133,7 @@ if submitted:
             result = run_pipeline(
                 project_id=state["project_id"],
                 dp_type=dp_type,
-                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.13.qgz"),
+                template=str(Path(__file__).parent / "templates" / "modele_DP_v4.14.qgz"),
                 work_dir=str(work_dir),
                 # authentification deja faite lors de la recherche des systemes
                 # (etape 1 ci-dessus) -- reutilisee telle quelle, pas besoin de

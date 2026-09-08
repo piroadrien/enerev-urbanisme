@@ -1702,6 +1702,44 @@ def replace_extent_and_rotation(qgs_text: str, carte_id: str, xmin, ymin, xmax, 
     return qgs_text[:start] + new_tag_text + qgs_text[end:], True
 
 
+def replace_picture_rotation_by_uuid(qgs_text: str, item_uuid: str, rotation_deg: float) -> tuple:
+    """Fixe la rotation (attribut pictureRotation) d'un element image
+    (LayoutItem type Image, ex: fleche du Nord) identifie par son uuid --
+    contrairement a 'id' (ex: 'Flèche du Nord'), l'uuid est unique meme
+    quand plusieurs elements partagent le meme id lisible.
+
+    Convention verifiee empiriquement (rendu QGIS reel, 08/09/2026) :
+    pictureRotation tourne dans le sens HORAIRE (0=haut, 90=droite,
+    180=bas, 270=gauche) -- oppose a la convention des icones de symbole
+    ponctuel (cf. Vues_Texte), qui tourne dans le sens anti-horaire.
+    """
+    tag_pattern = re.compile(r'<LayoutItem\b[^>]*\buuid="' + re.escape(item_uuid) + r'"[^>]*>')
+    m = tag_pattern.search(qgs_text)
+    if not m:
+        return qgs_text, False
+    tag_text = m.group()
+    new_tag_text, n = re.subn(r'(\bpictureRotation=")[^"]*(")', lambda mm: mm.group(1) + f"{rotation_deg:.2f}" + mm.group(2), tag_text)
+    if n == 0:
+        return qgs_text, False
+    start, end = m.span()
+    return qgs_text[:start] + new_tag_text + qgs_text[end:], True
+
+
+# UUID des 3 fleches du Nord (LayoutItem type Image) sur les rapports DP7
+# et DP8 -- identifiees par proximite avec les LayoutItem des photos
+# elles-memes (Photo_rue_dp7.jpg / Photo_gauche_dp8.jpg /
+# Photo_droite_dp8.jpg) dans le template modele_DP_v4.13.qgz. Comme pour
+# les identifiants de carte (SCALE_TO_CARTE_ID), ces uuid sont supposes
+# stables tant que ces elements ne sont pas supprimes/recrees dans QGIS
+# Desktop -- a revalider si une future edition manuelle du template les
+# affecte (verifiable en cherchant 'Flèche du Nord' avec l'uuid attendu).
+NORTH_ARROW_UUIDS = {
+    "dp7": "{34db0f2a-6c83-4ef7-8776-8f832a6e2fef}",
+    "dp8_gauche": "{ae5a11f3-b58e-4937-aad5-ea24aff0b816}",
+    "dp8_droite": "{f91d1962-91c1-46a3-9704-0241d7e316d0}",
+}
+
+
 def circular_mean_degrees(angles_deg: list) -> float:
     """Moyenne circulaire d'une liste d'azimuts (0-360°) -- une moyenne
     arithmetique classique serait fausse pour des angles a cheval sur 0/360
@@ -1797,7 +1835,7 @@ def compute_panel_tight_view(design, map_width_mm=210.0, map_height_mm=170.0, ma
     )
 
 
-def build_project_qgz(template_qgz: Path, out_qgz: Path, dp_variables: dict, extents_by_scale: dict, toiture_view=None):
+def build_project_qgz(template_qgz: Path, out_qgz: Path, dp_variables: dict, extents_by_scale: dict, toiture_view=None, street_info=None):
     # nom unique (horodatage) plutot qu'un nom fixe : evite de devoir supprimer
     # un dossier existant, ce qui echoue parfois si OneDrive le verrouille
     # momentanement pendant une synchronisation
@@ -1851,6 +1889,30 @@ def build_project_qgz(template_qgz: Path, out_qgz: Path, dp_variables: dict, ext
             if not ok:
                 print(f"  ATTENTION : emprise '{carte_id}' non trouvee dans le template.", file=sys.stderr)
         print(f"  emprises plan de toiture (DP4, zoom serre + rotation {rotation_deg:.0f}°) remplacees : {ok_count_toiture}/{len(TOITURE_CARTE_IDS)}")
+
+    if street_info is not None:
+        # fleches du Nord des rapports DP7/DP8 : orientees pour indiquer le
+        # vrai Nord relatif a l'angle de prise de vue de CHAQUE photo (et
+        # non un simple Nord-vers-le-haut, qui n'a pas de sens sur une
+        # photo qui n'est pas une carte). Convention verifiee
+        # empiriquement : pictureRotation tourne dans le sens horaire, donc
+        # (360 - cap) et non le cap directement (cf. replace_picture_
+        # rotation_by_uuid).
+        headings_by_arrow = {
+            "dp7": street_info.get("heading_property"),
+            "dp8_gauche": street_info.get("heading_left"),
+            "dp8_droite": street_info.get("heading_right"),
+        }
+        ok_count_nord = 0
+        for key, heading in headings_by_arrow.items():
+            if heading is None:
+                continue
+            rotation = (360 - heading) % 360
+            qgs_text, ok = replace_picture_rotation_by_uuid(qgs_text, NORTH_ARROW_UUIDS[key], rotation)
+            ok_count_nord += int(ok)
+            if not ok:
+                print(f"  ATTENTION : fleche du Nord '{key}' non trouvee dans le template.", file=sys.stderr)
+        print(f"  fleches du Nord DP7/DP8 orientees : {ok_count_nord}/{len(headings_by_arrow)}")
 
     qgs_path.write_text(qgs_text, encoding="utf-8")
 
@@ -2026,6 +2088,7 @@ def run_pipeline(
 
     log("[7/8] Photos Street View (DP7/DP8) + points de vue (DP1/DP2)...")
     vues_gpkg = project_dir / "Vues_prises.gpkg"
+    street_info = None
     if google_api_key:
         try:
             street_info = update_streetview_photos(geo["lat"], geo["lon"], google_api_key, project_dir,
@@ -2055,7 +2118,7 @@ def run_pipeline(
         "dp_auteur": get_project_author(project),
     }
     out_qgz = Path(out) if out else project_dir / f"{safe_name}.qgz"
-    build_project_qgz(Path(template), out_qgz, dp_variables, extents, toiture_view)
+    build_project_qgz(Path(template), out_qgz, dp_variables, extents, toiture_view, street_info=street_info)
 
     # versants de toiture equipes (azimut/pente par tableau) -- necessaire a
     # la description CERFA ET a la notice DPC11 (materiaux/execution), cf.
