@@ -84,6 +84,27 @@ def make_session():
     return session
 
 
+def fetch_project_systems(project_id, org_id=None, token=None, username=None, password=None, mfa=None):
+    """Recupere la liste des systemes d'un projet SANS lancer tout le
+    pipeline -- utilise par l'appli Streamlit pour proposer un menu
+    deroulant de selection quand un projet en a plusieurs, avant
+    d'appeler run_pipeline() avec le systeme choisi (cf. app.py).
+    Renvoie (systems, token, org_id) -- le token/org_id sont reutilisables
+    tels quels pour eviter une seconde authentification dans l'appel a
+    run_pipeline() qui suit.
+    """
+    class _Args:
+        pass
+    args = _Args()
+    args.token, args.org_id = token, org_id
+    args.username, args.password, args.mfa = username, password, mfa
+
+    session = requests.Session()
+    tok, org = get_token_and_org(args, session)
+    systems = list_systems(session, org, project_id, tok)
+    return systems, tok, org
+
+
 def get_token_and_org(args, session):
     if args.token:
         org_id = args.org_id or os.environ.get("OPENSOLAR_ORG_ID")

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from generate_dp import run_pipeline
+from generate_dp import run_pipeline, fetch_project_systems
 from cerfa_export import build_gnau_package, stamp_bordereau_checkboxes
 
 
@@ -48,27 +48,79 @@ st.title("📐 Generateur de dossier DP")
 st.caption(f"Version deployee : commit `{_deployed_commit()}`")
 st.caption("A partir d'un numero de projet OpenSolar : cadastre, panneaux, Street View, et mise en page QGIS pretes.")
 
-with st.form("dp_form"):
-    project_id = st.text_input("Numero de projet OpenSolar", placeholder="ex: 9984170")
-    dp_type = st.selectbox("Type d'installation", ["Toiture photovoltaïque", "Carport photovoltaïque"])
-    postcode = st.text_input("Code postal (optionnel, aide au geocodage si adresse ambigue)")
-    moa_adresse = st.text_input("Adresse du MOA si differente de l'adresse du site (optionnel)")
-    system = st.text_input(
-        "Systeme (optionnel -- uuid ou index, seulement si le projet en a plusieurs)",
-        help="Laisse vide si le projet n'a qu'un seul systeme. Si erreur "
-             "'ce projet a plusieurs systemes', l'erreur liste les uuid/index "
-             "disponibles a coller ici.",
-    )
-    submitted = st.form_submit_button("Generer le dossier")
-
+if "systems_state" not in st.session_state:
+    st.session_state.systems_state = None  # {"project_id", "systems", "token", "org_id"}
 if "dp_result" not in st.session_state:
     st.session_state.dp_result = None
 
-if submitted:
+# --- etape 1 : numero de projet, puis recherche du/des systeme(s) --------
+# Separee du formulaire principal : necessaire pour pouvoir interroger
+# OpenSolar et afficher un menu deroulant AVANT de soumettre la generation
+# (impossible a l'interieur d'un st.form, qui ne se soumet qu'en bloc).
+project_id = st.text_input("Numero de projet OpenSolar", placeholder="ex: 9984170", key="project_id_input")
+fetch_clicked = st.button("Rechercher le(s) systeme(s)")
+
+if fetch_clicked:
     if not project_id.strip():
         st.error("Merci de renseigner un numero de projet.")
-        st.stop()
+        st.session_state.systems_state = None
+    else:
+        with st.spinner("Recherche du/des systeme(s)..."):
+            try:
+                systems, tok, org = fetch_project_systems(
+                    project_id.strip(),
+                    org_id=st.secrets.get("opensolar_org_id"),
+                    username=st.secrets.get("opensolar_username"),
+                    password=st.secrets.get("opensolar_password"),
+                )
+                if not systems:
+                    st.error("Aucun systeme trouve pour ce projet.")
+                    st.session_state.systems_state = None
+                else:
+                    st.session_state.systems_state = {
+                        "project_id": project_id.strip(), "systems": systems,
+                        "token": tok, "org_id": org,
+                    }
+            except Exception as exc:
+                st.error(f"Erreur : {exc}")
+                st.session_state.systems_state = None
 
+state = st.session_state.systems_state
+systems_ready = bool(state and state["project_id"] == project_id.strip())
+
+if state and not systems_ready:
+    st.info("Le numero de projet a change -- clique sur \"Rechercher le(s) systeme(s)\" a nouveau.")
+
+selected_system_uuid = None
+if systems_ready:
+    systems = state["systems"]
+    if len(systems) == 1:
+        s = systems[0]
+        selected_system_uuid = s.get("uuid")
+        st.success(f"1 systeme trouve : {s.get('name') or 'Sans nom'} — {s.get('kw_stc')} kWc")
+    else:
+        options = {}
+        for s in systems:
+            label = f"{s.get('name') or 'Sans nom'} — {s.get('kw_stc')} kWc"
+            if s.get("is_current"):
+                label += " (actuel)"
+            options[label] = s.get("uuid")
+        chosen_label = st.selectbox(f"{len(systems)} systemes trouves -- lequel utiliser ?", list(options.keys()))
+        selected_system_uuid = options[chosen_label]
+
+# --- etape 2 : le reste du formulaire, seulement une fois le systeme
+#     identifie (automatiquement si un seul, ou choisi dans le menu) -----
+with st.form("dp_form"):
+    dp_type = st.selectbox("Type d'installation", ["Toiture photovoltaïque", "Carport photovoltaïque"])
+    postcode = st.text_input("Code postal (optionnel, aide au geocodage si adresse ambigue)")
+    moa_adresse = st.text_input("Adresse du MOA si differente de l'adresse du site (optionnel)")
+    submitted = st.form_submit_button("Generer le dossier", disabled=not systems_ready)
+
+if submitted and not systems_ready:
+    st.error("Recherche d'abord le(s) systeme(s) du projet (bouton ci-dessus).")
+    st.stop()
+
+if submitted:
     st.session_state.dp_result = None  # efface le resultat precedent tant que le nouveau n'est pas pret
     status = st.status("Generation en cours...", expanded=True)
 
@@ -79,18 +131,19 @@ if submitted:
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = Path(tmp) / "projets"
             result = run_pipeline(
-                project_id=project_id.strip(),
+                project_id=state["project_id"],
                 dp_type=dp_type,
                 template=str(Path(__file__).parent / "templates" / "modele_DP_v4.12.qgz"),
                 work_dir=str(work_dir),
-                # secrets : voir .streamlit/secrets.toml (Community Cloud : onglet "Secrets" de l'app)
-                username=st.secrets.get("opensolar_username"),
-                password=st.secrets.get("opensolar_password"),
-                org_id=st.secrets.get("opensolar_org_id"),
+                # authentification deja faite lors de la recherche des systemes
+                # (etape 1 ci-dessus) -- reutilisee telle quelle, pas besoin de
+                # se reconnecter a OpenSolar une seconde fois.
+                token=state["token"],
+                org_id=state["org_id"],
                 google_api_key=st.secrets.get("google_api_key"),
                 moa_adresse=moa_adresse or None,
                 postcode=postcode or None,
-                system=system.strip() or None,
+                system=selected_system_uuid,
                 log=log,
             )
 
