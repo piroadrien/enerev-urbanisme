@@ -920,35 +920,120 @@ def fetch_streetview_image(lat, lon, heading, api_key, out_path, size=STREETVIEW
 STREETVIEW_PHOTO_FILENAMES = ["Photo_rue_dp7.jpg", "Photo_gauche_dp8.jpg", "Photo_droite_dp8.jpg"]
 
 
+GOOGLE_TILE_API_URL = "https://tile.googleapis.com/v1"
+
+
+def get_street_orientation_from_google(lat: float, lon: float, api_key: str, radius_m: int = 50) -> dict:
+    """Estime l'azimut 'face a la rue' a partir des metadonnees Street View
+    de Google lui-meme (Map Tiles API), plutot que d'une source tierce
+    (Overpass) ou d'une approximation (empreinte batiment).
+
+    Principe (suggestion d'Adrien, 08/09/2026 -- meilleure source que tout
+    ce qui precede) : la reponse de metadonnees d'un panorama contient
+    directement :
+      - "heading" : le cap du panorama lui-meme (approximativement l'axe
+        de la rue, puisque les vehicules Street View roulent le long de
+        la chaussee) ;
+      - "links" : les panoramas adjacents le long de la meme rue, chacun
+        avec le cap exact vers ce panorama voisin -- la source la plus
+        precise, deux liens presque opposes (~180° d'ecart) confirmant un
+        troncon de rue rectiligne.
+    On privilegie les liens (moyenne circulaire des caps mod 180, pour
+    ignorer le sens de circulation) ; a defaut, le cap du panorama lui-
+    meme. Necessite l'activation de la 'Map Tiles API' dans Google Cloud
+    Console (distincte de la Street View Static API deja utilisee) --
+    meme cle API, meme projet/facturation.
+    """
+    session_resp = requests.post(
+        f"{GOOGLE_TILE_API_URL}/createSession",
+        params={"key": api_key},
+        json={"mapType": "streetview", "language": "fr-FR", "region": "FR"},
+        timeout=15,
+    )
+    if session_resp.status_code != 200:
+        raise RuntimeError(f"Map Tiles API : creation de session echouee (HTTP {session_resp.status_code}, {session_resp.text[:200]})")
+    session_token = session_resp.json().get("session")
+    if not session_token:
+        raise RuntimeError("Map Tiles API : reponse de session sans jeton 'session'.")
+
+    meta_resp = requests.get(
+        f"{GOOGLE_TILE_API_URL}/streetview/metadata",
+        params={"session": session_token, "key": api_key, "lat": lat, "lng": lon, "radius": radius_m},
+        timeout=15,
+    )
+    if meta_resp.status_code != 200:
+        raise RuntimeError(f"Map Tiles API : metadonnees indisponibles (HTTP {meta_resp.status_code}, {meta_resp.text[:200]})")
+    meta = meta_resp.json()
+    if "panoId" not in meta:
+        raise RuntimeError(f"Map Tiles API : aucun panorama a proximite ({meta})")
+
+    pano_lat, pano_lon = meta["lat"], meta["lng"]
+    links = meta.get("links") or []
+
+    if len(links) >= 2:
+        # moyenne circulaire des caps mod 180 (une rue n'a pas de "sens" --
+        # deux liens opposes a ~180° doivent converger vers le meme axe)
+        angles_mod180 = [h["heading"] % 180 for h in links]
+        sin_sum = sum(math.sin(math.radians(a * 2)) for a in angles_mod180)
+        cos_sum = sum(math.cos(math.radians(a * 2)) for a in angles_mod180)
+        road_bearing = (math.degrees(math.atan2(sin_sum, cos_sum)) / 2) % 180
+        source_detail = f"{len(links)} liens panorama"
+    elif len(links) == 1:
+        road_bearing = links[0]["heading"] % 180
+        source_detail = "1 lien panorama"
+    else:
+        road_bearing = meta.get("heading", 0.0) % 180
+        source_detail = "cap du panorama (aucun lien disponible)"
+
+    perp_a, perp_b = (road_bearing + 90) % 360, (road_bearing - 90) % 360
+    bearing_to_property = bearing_degrees(pano_lat, pano_lon, lat, lon)
+
+    def angular_diff(a, b):
+        d = abs(a - b) % 360
+        return min(d, 360 - d)
+
+    heading_property = perp_a if angular_diff(perp_a, bearing_to_property) < angular_diff(perp_b, bearing_to_property) else perp_b
+
+    return {
+        "road_bearing": road_bearing, "heading_property": heading_property,
+        "distance_to_road_m": None, "source": f"google_tiles ({source_detail})",
+        "cam_lat": pano_lat, "cam_lon": pano_lon,
+    }
+
+
 def update_streetview_photos(lat, lon, api_key, work_dir: Path, cadastre_gpkg: Path = None, ogr2ogr_path: str = None):
+    street = None
     try:
-        street = get_street_orientation(lat, lon)
-    except Exception as exc:
-        print(f"  Overpass indisponible ({exc}) -> repli sur l'empreinte du batiment", file=sys.stderr)
-        street = None
-        if cadastre_gpkg is not None and ogr2ogr_path is not None:
-            try:
-                street = get_heading_fallback_from_building(lat, lon, cadastre_gpkg, ogr2ogr_path)
-            except Exception as exc_bati:
-                print(f"  Empreinte du batiment indisponible aussi ({exc_bati}) -> repli sur la position du point de vue Street View", file=sys.stderr)
-        if street is None:
-            try:
-                street = get_heading_fallback_from_panorama(lat, lon, api_key)
-            except Exception as exc2:
-                # aucune des methodes n'a fonctionne : on supprime les
-                # eventuelles photos d'un AUTRE projet plutot que de les laisser
-                # silencieusement en place (mieux vaut un DP7/DP8 vide et visible
-                # a completer, qu'une mauvaise photo qui passe inapercue)
-                removed = []
-                for filename in STREETVIEW_PHOTO_FILENAMES:
-                    fp = work_dir / filename
-                    if fp.exists():
-                        fp.unlink()
-                        removed.append(filename)
-                msg = f"Aucune couverture disponible ici, ni via OSM ni via Street View ({exc2})."
-                if removed:
-                    msg += f" Anciennes photos supprimees ({', '.join(removed)}) pour eviter de reutiliser celles d'un autre projet."
-                raise RuntimeError(msg)
+        street = get_street_orientation_from_google(lat, lon, api_key)
+    except Exception as exc_google:
+        print(f"  Map Tiles API indisponible ({exc_google}) -> repli sur Overpass/OSM", file=sys.stderr)
+        try:
+            street = get_street_orientation(lat, lon)
+        except Exception as exc:
+            print(f"  Overpass indisponible ({exc}) -> repli sur l'empreinte du batiment", file=sys.stderr)
+            if cadastre_gpkg is not None and ogr2ogr_path is not None:
+                try:
+                    street = get_heading_fallback_from_building(lat, lon, cadastre_gpkg, ogr2ogr_path)
+                except Exception as exc_bati:
+                    print(f"  Empreinte du batiment indisponible aussi ({exc_bati}) -> repli sur la position du point de vue Street View", file=sys.stderr)
+            if street is None:
+                try:
+                    street = get_heading_fallback_from_panorama(lat, lon, api_key)
+                except Exception as exc2:
+                    # aucune des methodes n'a fonctionne : on supprime les
+                    # eventuelles photos d'un AUTRE projet plutot que de les laisser
+                    # silencieusement en place (mieux vaut un DP7/DP8 vide et visible
+                    # a completer, qu'une mauvaise photo qui passe inapercue)
+                    removed = []
+                    for filename in STREETVIEW_PHOTO_FILENAMES:
+                        fp = work_dir / filename
+                        if fp.exists():
+                            fp.unlink()
+                            removed.append(filename)
+                    msg = f"Aucune couverture disponible ici, ni via OSM ni via Street View ({exc2})."
+                    if removed:
+                        msg += f" Anciennes photos supprimees ({', '.join(removed)}) pour eviter de reutiliser celles d'un autre projet."
+                    raise RuntimeError(msg)
 
     heading_property = street["heading_property"]
     heading_left = (heading_property - 90) % 360
