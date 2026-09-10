@@ -42,6 +42,12 @@ def toml_escape(value: str) -> str:
 
 
 def main():
+    # Force l'UTF-8 en sortie, independamment de l'encodage par defaut de la
+    # console (cp1252 sous Windows) -- sinon les accents ecrits vers le
+    # fichier .toml (via redirection stdout) sont corrompus silencieusement.
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
     if len(sys.argv) != 2:
         print("Usage : python build_gnau_secrets.py <export.csv>", file=sys.stderr)
         sys.exit(1)
@@ -52,23 +58,38 @@ def main():
         sys.exit(1)
 
     unresolved = []
+    skipped_no_url = []
     blocks = ["[gnau]"]
 
-    with open(csv_path, encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
+    with open(csv_path, encoding="utf-8-sig", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+        except csv.Error:
+            dialect = csv.excel
+        reader = csv.DictReader(f, dialect=dialect)
         fieldmap = {name.strip().lower(): name for name in reader.fieldnames or []}
-        title_col = fieldmap.get("title")
-        url_col = fieldmap.get("url")
-        user_col = fieldmap.get("user name") or fieldmap.get("username")
+        # Les differents exporteurs CSV de KeePass 2.x n'utilisent pas tous
+        # les memes noms de colonnes (ni le meme delimiteur, detecte ci-dessus) :
+        # "KeePass CSV (1.x)" -> Title/User Name/URL, virgules ;
+        # export CSV generique -> Account/Login Name/Web Site, point-virgules.
+        title_col = fieldmap.get("title") or fieldmap.get("account") or fieldmap.get("name")
+        url_col = fieldmap.get("url") or fieldmap.get("web site") or fieldmap.get("website")
+        user_col = fieldmap.get("user name") or fieldmap.get("username") or fieldmap.get("login name") or fieldmap.get("login")
         pass_col = fieldmap.get("password")
         if not title_col or not url_col:
-            print("Le CSV doit contenir au minimum les colonnes 'Title' et 'URL'.", file=sys.stderr)
+            print(f"Colonnes trouvees : {list(fieldmap.values())}", file=sys.stderr)
+            print("Le CSV doit contenir au minimum une colonne nom de commune (Title/Account) et une URL (URL/Web Site).", file=sys.stderr)
             sys.exit(1)
 
         for row in reader:
             commune = (row.get(title_col) or "").strip()
             url = (row.get(url_col) or "").strip()
-            if not commune or not url:
+            if not commune:
+                continue
+            if not url:
+                skipped_no_url.append(commune)
                 continue
 
             print(f"Resolution INSEE pour '{commune}'...", end=" ", file=sys.stderr)
@@ -101,6 +122,11 @@ def main():
     if unresolved:
         print("\n# A verifier/ajouter manuellement (nom introuvable ou ambigu) :", file=sys.stderr)
         for name in unresolved:
+            print(f"#   - {name}", file=sys.stderr)
+
+    if skipped_no_url:
+        print("\n# Ignorees (pas d'URL renseignee dans KeePass) :", file=sys.stderr)
+        for name in skipped_no_url:
             print(f"#   - {name}", file=sys.stderr)
 
 
