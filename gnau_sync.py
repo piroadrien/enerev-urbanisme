@@ -29,7 +29,14 @@ import requests
 
 import ms_graph
 from email_templates import CLIENT_TEMPLATES, INTERNAL_REFUS_TEMPLATE, render
-from gnau_email_parser import STATUT_ACCORDEE, STATUT_ENVOYEE, STATUT_REFUSEE, classify_email, normalize_dp_number
+from gnau_email_parser import (
+    STATUT_ACCORDEE,
+    STATUT_ENVOYEE,
+    STATUT_REFUSEE,
+    classify_email,
+    is_status_regression,
+    normalize_dp_number,
+)
 
 BAN_SEARCH_URL = "https://api-adresse.data.gouv.fr/search/"
 
@@ -100,10 +107,33 @@ def process_event(config: dict, rows: list[dict], event, received_date_iso: Opti
             elif len(candidates) > 1:
                 return {"action": "ambigu", "commune": event.commune, "dp_number": event.dp_number,
                         "detail": f"{len(candidates)} lignes 'Genere' candidates pour INSEE {insee}, aucune retenue automatiquement"}
-            # 0 candidat : email pour un dossier non genere par l'app (ou deja rapproche) -- on ignore.
+            # 0 candidat : pas de ligne "Genere" en attente pour cette commune --
+            # tombe dans le cas "backfill" ci-dessous (cree une ligne a completer).
+
+    if row is None and event.dp_number and event.status:
+        # Backfill : dossier deja depose hors de l'app (ou avant la mise en
+        # place du suivi), donc jamais de ligne "Genere" prealable. On cree la
+        # ligne avec ce qu'on sait deja (commune, n° DP) ; le nom du client,
+        # son email/telephone et l'adresse restent a completer manuellement --
+        # tant que EmailClient est vide, aucune notification n'est envoyee.
+        insee = resolve_insee(event.commune) if event.commune else None
+        fields = {"Title": "(à compléter)", "Ville": event.commune or "", "INSEE": insee or ""}
+        created = ms_graph.create_list_item(config, fields)
+        created.setdefault("fields", {}).update(fields)
+        rows.append(created)
+        row = created
 
     if row is None or event.status is None:
         return None
+
+    previous_status = _row_fields(row).get("Statut")
+    if is_status_regression(previous_status, event.status):
+        # doublon/renvoi tardif d'une notification deja depassee par la suite
+        # du dossier (constate en pratique sur certains portails) -- on ignore
+        # la mise a jour de statut mais on garde les infos ponctuelles utiles
+        # (numero DP, dates) si elles manquaient encore.
+        return {"action": "regression_ignoree", "row_id": row["id"], "statut_actuel": previous_status,
+                "statut_ignore": event.status, "dp_number": event.dp_number}
 
     fields_update = {"Statut": event.status}
     if event.dp_number and not _row_fields(row).get("NumeroDP"):
@@ -118,7 +148,6 @@ def process_event(config: dict, rows: list[dict], event, received_date_iso: Opti
         # reelle de decision (approximation raisonnable, a quelques heures pres).
         fields_update["DateReelle"] = received_date_iso
 
-    previous_status = _row_fields(row).get("Statut")
     ms_graph.update_list_item(config, row["id"], fields_update)
     _row_fields(row).update(fields_update)  # garde `rows` a jour pour les evenements suivants du meme lot
 
@@ -167,13 +196,24 @@ def run_sync(config: dict) -> list[dict]:
     results = []
 
     for message in reversed(messages):  # plus ancien -> plus recent, pour respecter l'ordre chronologique
-        body_text = ms_graph.get_message_body_text(message)
-        event = classify_email(message.get("subject", ""), body_text)
-        received_date_iso = (message.get("receivedDateTime") or "")[:10] or None
-        outcome = process_event(config, rows, event, received_date_iso)
-        if outcome:
-            results.append(outcome)
-        ms_graph.mark_message_processed(config, message["id"])
+        try:
+            body_text = ms_graph.get_message_body_text(message)
+            event = classify_email(message.get("subject", ""), body_text)
+            received_date_iso = (message.get("receivedDateTime") or "")[:10] or None
+            outcome = process_event(config, rows, event, received_date_iso)
+            if outcome:
+                results.append(outcome)
+        except Exception as exc:
+            # une erreur sur un message (parsing, ecriture SharePoint...) ne
+            # doit pas empecher de traiter les autres messages du lot.
+            results.append({"action": "erreur", "message_id": message.get("id"),
+                             "subject": message.get("subject"), "detail": str(exc)})
+            continue
+        finally:
+            try:
+                ms_graph.mark_message_processed(config, message["id"])
+            except Exception as exc:
+                results.append({"action": "erreur_marquage", "message_id": message.get("id"), "detail": str(exc)})
 
     return results
 

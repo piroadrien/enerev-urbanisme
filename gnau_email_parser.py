@@ -24,6 +24,27 @@ STATUT_INCOMPLETE = "Incomplète"
 STATUT_ACCORDEE = "Accordée"
 STATUT_REFUSEE = "Refusée"
 
+# Rang de progression de chaque statut -- les portails GNAU renvoient parfois
+# en double un email deja traite (constate en pratique : un "accuse de
+# reception" reenvoye des jours apres, alors que le dossier a deja avance).
+# Sans verification, un doublon tardif ecraserait un statut plus avance par
+# un statut plus ancien. STATUT_COMPLETE et STATUT_INCOMPLETE partagent le
+# meme rang (un dossier peut legitimement passer de l'un a l'autre).
+STATUT_RANK = {
+    STATUT_GENERE: 0,
+    STATUT_ENVOYEE: 1,
+    STATUT_COMPLETE: 2,
+    STATUT_INCOMPLETE: 2,
+    STATUT_ACCORDEE: 3,
+    STATUT_REFUSEE: 3,
+}
+
+
+def is_status_regression(previous: Optional[str], new: Optional[str]) -> bool:
+    """True si `new` reculerait par rapport a `previous` (statut inconnu
+    traite comme rang 0, donc jamais considere comme une regression)."""
+    return STATUT_RANK.get(previous, 0) > STATUT_RANK.get(new, 0)
+
 # Regex du numero de DP definitif. Formats reellement observes :
 #   "DP 78133 26 G0057", "DP 92063 26 00315", "DP 095476 26U0116" (pas
 #   d'espace avant la lettre de section), "DP 092 009 26 00126" (bloc INSEE
