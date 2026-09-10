@@ -1958,6 +1958,7 @@ class PipelineResult:
     cerfa: Path           # CERFA rempli (cerfa_DPC_1_1.pdf), pret pour build_gnau_package()
     notice_dpc11: Path    # notice materiaux/execution (DPC11_notice.pdf), pret pour build_gnau_package()
     project_dir: Path
+    citycode: str          # code INSEE de la commune (geo["citycode"]), pour retrouver ses identifiants GNAU dans st.secrets["gnau"]
 
 
 def run_pipeline(
@@ -2156,7 +2157,7 @@ def run_pipeline(
     )
 
     log(f"\nOK : {out_qgz}")
-    return PipelineResult(qgz=out_qgz, cerfa=cerfa_pdf, notice_dpc11=notice_pdf, project_dir=project_dir)
+    return PipelineResult(qgz=out_qgz, cerfa=cerfa_pdf, notice_dpc11=notice_pdf, project_dir=project_dir, citycode=geo["citycode"])
 
 
 def main():

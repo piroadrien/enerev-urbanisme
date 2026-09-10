@@ -231,6 +231,7 @@ if submitted:
                 "pdf_error": pdf_error,
                 "gnau_zip_name": gnau_zip_name,
                 "gnau_zip_bytes": gnau_zip_bytes,
+                "citycode": result.citycode,
             }
 
     except Exception as exc:
@@ -304,3 +305,21 @@ if result:
                 "exporte DP1/DP2/DP4/DP6/DP7/DP8 manuellement depuis le .qgz, puis "
                 "zippe-les avec ce CERFA et cette notice sous les noms DPC1_1_1.pdf ... DPC8_1_1.pdf et DPC11_1_1.pdf."
             )
+
+    gnau_directory = st.secrets.get("gnau", {})
+    entry = gnau_directory.get(result["citycode"])
+    st.subheader("Depot GNAU")
+    if entry:
+        st.link_button(f"🔗 Ouvrir le portail GNAU de {entry.get('nom', result['citycode'])}", entry["url"])
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("Identifiant")
+            st.code(entry.get("username", ""), language=None)
+        with col2:
+            st.caption("Mot de passe")
+            st.code(entry.get("password", ""), language=None)
+    else:
+        st.info(
+            f"Portail GNAU non repertorie pour cette commune (INSEE {result['citycode']}). "
+            "Ajoute une section [gnau.\"<insee>\"] dans les secrets Streamlit (voir build_gnau_secrets.py)."
+        )
