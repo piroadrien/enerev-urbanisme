@@ -42,10 +42,40 @@ LABELS = {
     "DateEstimee": "Date estimée", "DateReelle": "Date réelle",
 }
 
-rows = [{col: (it.get("fields", {}).get(col) or "") for col in COLONNES_AFFICHEES} for it in items]
+DATE_COLS = {"DateGeneration", "DateDepot", "DateEstimee", "DateReelle"}
+
+
+def _fmt(col: str, value):
+    # SharePoint renvoie les dates en ISO datetime complet (ex:
+    # "2026-03-23T07:00:00Z") meme pour une colonne "date only" -- on ne
+    # garde que la partie date, plus lisible dans le tableau.
+    if col in DATE_COLS and value:
+        return str(value)[:10]
+    return value
+
+
+rows = [{col: _fmt(col, it.get("fields", {}).get(col) or "") for col in COLONNES_AFFICHEES} for it in items]
 df = pd.DataFrame(rows).rename(columns=LABELS)
 
-st.dataframe(df, use_container_width=True, hide_index=True)
+# Couleur de fond par ligne selon le statut -- code couleur commun (bleu =
+# en cours, jaune = attention/action requise, vert = favorable, rouge = refus).
+STATUT_COULEURS = {
+    "Généré": "#e9ecef",
+    "Envoyée": "#cfe2ff",
+    "Complète": "#d1f0d1",
+    "Incomplète": "#fff3cd",
+    "Accordée": "#b7e4b7",
+    "Refusée": "#f8d7da",
+}
+
+
+def _highlight_row(row):
+    couleur = STATUT_COULEURS.get(row["Statut"], "")
+    style = f"background-color: {couleur}; color: #1a1a1a;" if couleur else ""
+    return [style] * len(row)
+
+
+st.dataframe(df.style.apply(_highlight_row, axis=1), use_container_width=True, hide_index=True)
 
 st.subheader("Accès GNAU par dossier")
 gnau_directory = st.secrets.get("gnau", {})
