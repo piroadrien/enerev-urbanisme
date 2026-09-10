@@ -303,7 +303,12 @@ def get_client_info(project):
         f"{project.get('zip', '')} {project.get('locality', '')}".strip(),
     ]))
 
-    return {"nom_moa": nom, "adresse_site": adresse or "—"}
+    return {
+        "nom_moa": nom,
+        "adresse_site": adresse or "—",
+        "email": contact.get("email") or "",
+        "telephone": contact.get("phone") or "",
+    }
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1959,6 +1964,11 @@ class PipelineResult:
     notice_dpc11: Path    # notice materiaux/execution (DPC11_notice.pdf), pret pour build_gnau_package()
     project_dir: Path
     citycode: str          # code INSEE de la commune (geo["citycode"]), pour retrouver ses identifiants GNAU dans st.secrets["gnau"]
+    client_nom: str        # nom/raison sociale du client (client["nom_moa"]), pour la ligne de suivi DP
+    client_email: str      # email du contact OpenSolar, pour les notifications automatiques de statut DP
+    client_telephone: str
+    ville: str             # commune (geo["city"]), pour la ligne de suivi DP
+    adresse_site: str      # adresse complete du site (client["adresse_site"]), pour la ligne de suivi DP
 
 
 def run_pipeline(
@@ -2157,7 +2167,12 @@ def run_pipeline(
     )
 
     log(f"\nOK : {out_qgz}")
-    return PipelineResult(qgz=out_qgz, cerfa=cerfa_pdf, notice_dpc11=notice_pdf, project_dir=project_dir, citycode=geo["citycode"])
+    return PipelineResult(
+        qgz=out_qgz, cerfa=cerfa_pdf, notice_dpc11=notice_pdf, project_dir=project_dir,
+        citycode=geo["citycode"], client_nom=client["nom_moa"], client_email=client["email"],
+        client_telephone=client["telephone"], ville=geo.get("city") or "",
+        adresse_site=client["adresse_site"],
+    )
 
 
 def main():

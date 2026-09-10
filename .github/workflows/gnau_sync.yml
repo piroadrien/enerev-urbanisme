@@ -1,0 +1,30 @@
+name: Synchronisation suivi DP (emails GNAU)
+
+on:
+  schedule:
+    # Toutes les 30 minutes -- ajuster si besoin (les notifications GNAU ne
+    # sont pas urgentes a la minute pres).
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}  # permet un declenchement manuel depuis l'onglet Actions
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dependances
+        run: pip install requests msal beautifulsoup4
+
+      - name: Lancer la synchronisation
+        env:
+          MS_TENANT_ID: ${{ secrets.MS_TENANT_ID }}
+          MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+          MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
+          MS_SITE_ID: ${{ secrets.MS_SITE_ID }}
+          MS_LIST_ID: ${{ secrets.MS_LIST_ID }}
+        run: python gnau_sync.py

@@ -3,3 +3,6 @@ requests
 Pillow
 pypdf
 reportlab
+msal
+beautifulsoup4
+pandas

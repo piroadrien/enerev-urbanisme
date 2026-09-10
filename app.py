@@ -16,12 +16,14 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+from datetime import date
 from pathlib import Path
 
 import streamlit as st
 
 from generate_dp import run_pipeline, fetch_project_systems
 from cerfa_export import build_gnau_package, stamp_bordereau_checkboxes
+import ms_graph
 
 
 def _deployed_commit() -> str:
@@ -233,6 +235,27 @@ if submitted:
                 "gnau_zip_bytes": gnau_zip_bytes,
                 "citycode": result.citycode,
             }
+
+            # Ligne de suivi DP (liste SharePoint) -- best-effort : si le
+            # suivi SharePoint n'est pas configure ou indisponible, la
+            # generation du dossier ne doit pas echouer pour autant.
+            try:
+                sp_config = ms_graph.config_from_secrets(st.secrets)
+                if sp_config:
+                    gnau_entry = st.secrets.get("gnau", {}).get(result.citycode, {})
+                    ms_graph.create_list_item(sp_config, {
+                        "Title": result.client_nom,
+                        "Adresse": result.adresse_site,
+                        "Ville": result.ville,
+                        "INSEE": result.citycode,
+                        "EmailClient": result.client_email,
+                        "TelephoneClient": result.client_telephone,
+                        "LienGNAU": gnau_entry.get("url", ""),
+                        "Statut": "Généré",
+                        "DateGeneration": date.today().isoformat(),
+                    })
+            except Exception as exc:
+                log(f"  (ligne de suivi DP non creee, ignore : {exc})")
 
     except Exception as exc:
         status.update(label="Erreur", state="error")
